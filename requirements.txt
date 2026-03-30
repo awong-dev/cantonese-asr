@@ -1,0 +1,9 @@
+torch
+torchaudio
+datasets
+wav2vec
+whisper
+evaluate
+transformers[torch]
+jiwer
+torchcodec
