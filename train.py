@@ -6,7 +6,6 @@ import numpy as np
 import torch
 import torchaudio
 import argparse
-
 from datasets import load_dataset
 import evaluate
 from transformers import (Trainer, TrainingArguments, Wav2Vec2CTCTokenizer,
@@ -15,34 +14,33 @@ from transformers import (Trainer, TrainingArguments, Wav2Vec2CTCTokenizer,
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
-# ctc_loss doesn't work on mps as well as probably other things.
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"  # for Apple MPS if needed
 
 DATASET_DIR = 'data/cv-corpus-25.0-2026-03-09/yue'
 CLIPS_DIR = f"{DATASET_DIR}/clips"
-OUT_MODEL = 'wav2vec2-large-xlsr-cantonese-yue'
+OUT_MODEL = 'wav2vec2-xls-r-1b-cantonese-yue'
 OUT_MODEL_DIR = f"./{OUT_MODEL}"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str,
-                    default="facebook/wav2vec2-large-xlsr-53")
+                    default="facebook/wav2vec2-xls-r-1b")
 parser.add_argument('--unfreeze', action='store_true')
 parser.add_argument('--lr', type=float, default=3e-4)
-parser.add_argument('--warmup', type=float, default=500)
+parser.add_argument('--warmup', type=int, default=500)
 args = parser.parse_args()
-
-
 print(f"args: {args}")
 
+# ---------------------------------------------------------------------------
+# 1. Load datasets
+# ---------------------------------------------------------------------------
 full_common_voice_train = load_dataset(
     "csv",
     data_files=[f'{DATASET_DIR}/train.tsv', f'{DATASET_DIR}/validated.tsv'],
     delimiter="\t",
     split="train")
-
-common_voice_train = full_common_voice_train.shuffle(
-    seed=1997).select(range(100))
-
+# common_voice_train = full_common_voice_train.shuffle(
+#     seed=1997).select(range(100))
+common_voice_train = full_common_voice_train
 common_voice_test = load_dataset(
     'csv',
     data_files=f'{DATASET_DIR}/test.tsv',
@@ -50,21 +48,26 @@ common_voice_test = load_dataset(
     split="train[:10%]"
 )
 
+# Remove unused columns - filter to only columns that actually exist
 unused_cols = ["accents", "age", "client_id", "down_votes", "gender", "locale",
                "segment", "up_votes"]
-common_voice_train = common_voice_train.remove_columns(unused_cols)
-common_voice_test = common_voice_test.remove_columns(unused_cols)
+existing_train_cols = [c for c in unused_cols
+                       if c in common_voice_train.column_names]
+existing_test_cols = [c for c in unused_cols
+                      if c in common_voice_test.column_names]
+common_voice_train = common_voice_train.remove_columns(existing_train_cols)
+common_voice_test = common_voice_test.remove_columns(existing_test_cols)
 
-chars_to_ignore_regex = (r'[\丶\,\?\.\!\-\;\:"\“\%\‘\”\�\．\⋯\！\－\：\–\。'
+# ---------------------------------------------------------------------------
+# 2. Text preprocessing
+# ---------------------------------------------------------------------------
+chars_to_ignore_regex = (r'[\丶\,\?\.\!\-\;\:"\"\%\'\"\�\．\⋯\！\－\：\–\。'
                          r'\》\,\）\,\？\；\～\~\…\︰\，\（\」\‧\《\﹔\、\—'
                          r'\／\,\「\﹖\·\']')
 
 
 def remove_special_characters(batch):
     sen = re.sub(chars_to_ignore_regex, '', batch["sentence"]).lower() + " "
-    # convert 'D' and 'd' to '啲' if there a 'D' in sentence
-    # hacky stuff, wont work on 'D', 'd' co-occure with normal english words
-    # wont work on multiple 'D'
     if "d" in sen:
         if len([c for c in sen if c in string.ascii_lowercase]) == 1:
             sen = sen.replace("d", "啲")
@@ -76,6 +79,9 @@ common_voice_train = common_voice_train.map(remove_special_characters)
 common_voice_test = common_voice_test.map(remove_special_characters)
 
 
+# ---------------------------------------------------------------------------
+# 3. Build vocabulary
+# ---------------------------------------------------------------------------
 def extract_all_chars(batch):
     all_text = " ".join(batch["sentence"])
     vocab = list(set(all_text))
@@ -84,45 +90,44 @@ def extract_all_chars(batch):
 
 vocab_train = common_voice_train.map(
     extract_all_chars, batched=True,
-    cache_file_name='./cv_train_vocab.arrow',
     batch_size=16,
     remove_columns=common_voice_train.column_names,)
 vocab_test = common_voice_test.map(
     extract_all_chars, batched=True,
-    cache_file_name='./cv_test_vocab.arrow',
     batch_size=16,
     remove_columns=common_voice_test.column_names,)
+
 vocab_list = list(set(vocab_train["vocab"][0]) | set(vocab_test["vocab"][0]))
-
-# remove english char from vocab_list, so tokenizer will replace english
-# with [UNK]
+# remove english/ascii chars from vocab_list so tokenizer maps them to [UNK]
 vocab_list = [char for char in vocab_list if not char.isascii()]
-vocab_list.append(" ")  # previous will remove " " from vocab_list
+vocab_list.append(" ")  # re-add space
 
-vocab_dict = {v: k for k, v in enumerate(vocab_list)}
+vocab_dict = {v: k for k, v in enumerate(sorted(vocab_list))}
 vocab_dict["|"] = vocab_dict[" "]
 del vocab_dict[" "]
-
 vocab_dict["[UNK]"] = len(vocab_dict)
 vocab_dict["[PAD]"] = len(vocab_dict)
 
-with open("vocab.json", "w") as vocab_file:
-    json.dump(vocab_dict, vocab_file)
+with open("vocab.json", "w", encoding="utf-8") as vocab_file:
+    json.dump(vocab_dict, vocab_file, ensure_ascii=False)
 
+# ---------------------------------------------------------------------------
+# 4. Create processor
+# ---------------------------------------------------------------------------
 tokenizer = Wav2Vec2CTCTokenizer("./vocab.json", unk_token="[UNK]",
                                  pad_token="[PAD]", word_delimiter_token="|")
-
 feature_extractor = Wav2Vec2FeatureExtractor(feature_size=1,
                                              sampling_rate=16000,
                                              padding_value=0.0,
                                              do_normalize=True,
-                                             return_attention_mask=True,)
-
+                                             return_attention_mask=True)
 processor = Wav2Vec2Processor(feature_extractor=feature_extractor,
                               tokenizer=tokenizer)
 processor.save_pretrained(OUT_MODEL_DIR)
 
-
+# ---------------------------------------------------------------------------
+# 5. Load and resample audio
+# ---------------------------------------------------------------------------
 resamplers = {
     48000: torchaudio.transforms.Resample(48000, 16000),
     44100: torchaudio.transforms.Resample(44100, 16000),
@@ -134,7 +139,11 @@ resamplers = {
 def load_and_resample(batch):
     filepath = os.path.join(CLIPS_DIR, batch["path"])
     speech_array, sampling_rate = torchaudio.load(filepath)
-    batch["speech"] = resamplers[sampling_rate](speech_array).squeeze().numpy()
+    if sampling_rate != 16000:
+        batch["speech"] = resamplers[sampling_rate](
+            speech_array).squeeze().numpy()
+    else:
+        batch["speech"] = speech_array.squeeze().numpy()
     batch["sampling_rate"] = 16_000
     batch["target_text"] = batch["sentence"]
     return batch
@@ -142,15 +151,15 @@ def load_and_resample(batch):
 
 common_voice_train = common_voice_train.map(
     load_and_resample,
-    cache_file_name='./cv_train_resample.arrow',
     remove_columns=common_voice_train.column_names,)
-
 common_voice_test = common_voice_test.map(
     load_and_resample,
-    cache_file_name='./cv_test_resample.arrow',
     remove_columns=common_voice_test.column_names,)
 
 
+# ---------------------------------------------------------------------------
+# 6. Prepare features and labels
+# ---------------------------------------------------------------------------
 def prepare_dataset(batch):
     batch["input_values"] = processor(
         batch["speech"],
@@ -161,20 +170,21 @@ def prepare_dataset(batch):
 
 common_voice_train = common_voice_train.map(
     prepare_dataset,
-    cache_file_name='./cv_train_prep.arrow',
     remove_columns=common_voice_train.column_names,
     batch_size=16,
-    # num_proc=10,
-    batched=True,)
+    batched=True,
+)
 common_voice_test = common_voice_test.map(
     prepare_dataset,
-    cache_file_name='./cv_test_prep.arrow',
     remove_columns=common_voice_test.column_names,
     batch_size=16,
-    # num_proc=10,
-    batched=True,)
+    batched=True,
+)
 
 
+# ---------------------------------------------------------------------------
+# 7. Data collator
+# ---------------------------------------------------------------------------
 @dataclass
 class DataCollatorCTCWithPadding:
     """
@@ -217,7 +227,7 @@ class DataCollatorCTCWithPadding:
     def __call__(
         self, features: List[Dict[str, Union[List[int], torch.Tensor]]]
     ) -> Dict[str, torch.Tensor]:
-        # split inputs and labels since they have to be of different lenghts
+        # split inputs and labels since they have to be of different lengths
         # and need different padding methods
         input_features = [
             {"input_values": feature["input_values"]} for feature in features
@@ -240,19 +250,19 @@ class DataCollatorCTCWithPadding:
             return_tensors="pt",
         )
 
-        # Replace
-
         # replace padding with -100 to ignore loss correctly
         labels = labels_batch["input_ids"].masked_fill(
             labels_batch.attention_mask.ne(1), -100
         )
-
         batch["labels"] = labels
-
         return batch
 
 
 data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
+
+# ---------------------------------------------------------------------------
+# 8. Metrics
+# ---------------------------------------------------------------------------
 cer_metric = evaluate.load("cer")
 
 
@@ -271,6 +281,9 @@ def compute_metrics(pred):
     return {"cer": cer}
 
 
+# ---------------------------------------------------------------------------
+# 9. Load model
+# ---------------------------------------------------------------------------
 model = Wav2Vec2ForCTC.from_pretrained(
     args.model,
     attention_dropout=0.1,
@@ -287,6 +300,9 @@ model = Wav2Vec2ForCTC.from_pretrained(
 if not args.unfreeze:
     model.freeze_feature_encoder()
 
+# ---------------------------------------------------------------------------
+# 10. Training
+# ---------------------------------------------------------------------------
 training_args = TrainingArguments(
     output_dir=OUT_MODEL_DIR,
     per_device_train_batch_size=8,
@@ -294,15 +310,13 @@ training_args = TrainingArguments(
     eval_strategy="steps",
     eval_steps=400,
     num_train_epochs=40,
+    fp16=torch.cuda.is_available(),  # only enable on CUDA
     logging_strategy="steps",
     logging_steps=400,
     learning_rate=args.lr,
-    warmup_steps=100,
+    warmup_steps=args.warmup,
     save_steps=2376,  # every 3 epoch with batch_size 8
     save_total_limit=3,
-    ###################
-    # fp16_full_eval=True,
-    # dataloader_num_workers=20,
 )
 
 trainer = Trainer(
@@ -314,4 +328,5 @@ trainer = Trainer(
     eval_dataset=common_voice_test,
     processing_class=processor.feature_extractor,
 )
+
 trainer.train()
