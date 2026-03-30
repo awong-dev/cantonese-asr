@@ -90,11 +90,11 @@ def extract_all_chars(batch):
 
 vocab_train = common_voice_train.map(
     extract_all_chars, batched=True,
-    batch_size=64,
+    batch_size=16,
     remove_columns=common_voice_train.column_names,)
 vocab_test = common_voice_test.map(
     extract_all_chars, batched=True,
-    batch_size=64,
+    batch_size=16,
     remove_columns=common_voice_test.column_names,)
 
 vocab_list = list(set(vocab_train["vocab"][0]) | set(vocab_test["vocab"][0]))
@@ -305,8 +305,8 @@ if not args.unfreeze:
 # ---------------------------------------------------------------------------
 training_args = TrainingArguments(
     output_dir=OUT_MODEL_DIR,
-    per_device_train_batch_size=8,
-    gradient_accumulation_steps=2,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=16,
     eval_strategy="steps",
     eval_steps=400,
     num_train_epochs=40,
