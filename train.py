@@ -90,11 +90,11 @@ def extract_all_chars(batch):
 
 vocab_train = common_voice_train.map(
     extract_all_chars, batched=True,
-    batch_size=16,
+    batch_size=64,
     remove_columns=common_voice_train.column_names,)
 vocab_test = common_voice_test.map(
     extract_all_chars, batched=True,
-    batch_size=16,
+    batch_size=64,
     remove_columns=common_voice_test.column_names,)
 
 vocab_list = list(set(vocab_train["vocab"][0]) | set(vocab_test["vocab"][0]))
@@ -329,4 +329,4 @@ trainer = Trainer(
     processing_class=processor.feature_extractor,
 )
 
-trainer.train()
+trainer.train(resume_from_checkpoint=True)
