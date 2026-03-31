@@ -150,6 +150,18 @@ def parse_args():
         default=42,
         help="Random seed for shuffling and subsampling",
     )
+
+    # Caching
+    parser.add_argument(
+        "--no_streaming", action="store_true",
+        help="Disable streaming and preprocess all data upfront (uses disk cache). "
+             "Faster training but requires disk space for cached features.",
+    )
+    parser.add_argument(
+        "--cache_dir", type=str, default=None,
+        help="Directory for HF dataset cache (default: ~/.cache/huggingface). "
+             "Use when default disk is too small.",
+    )
     return parser.parse_args()
 
 
@@ -203,6 +215,12 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
+
+    # Set HF cache directory if specified
+    if args.cache_dir:
+        os.environ["HF_DATASETS_CACHE"] = args.cache_dir
+        os.makedirs(args.cache_dir, exist_ok=True)
+        print(f"Dataset cache dir: {args.cache_dir}")
 
     print(f"args: {args}")
     print(f"CUDA available: {torch.cuda.is_available()}")
@@ -336,11 +354,8 @@ def main():
         print(f"Subsampled to {args.max_train_samples} train samples")
 
     # -----------------------------------------------------------------------
-    # 6. Preprocessing — on-the-fly for training, materialized for eval
+    # 6. Preprocessing
     # -----------------------------------------------------------------------
-    # Training data is processed on-the-fly via IterableDataset to avoid
-    # caching gigabytes of mel spectrograms / waveforms to disk.
-    # Eval data is small enough to materialize in memory.
     max_input_length_samples = int(args.max_input_length * 16000)  # 30s * 16kHz
 
     train_len = len(common_voice["train"])
@@ -364,34 +379,7 @@ def main():
             batch["labels"] = tokenizer(batch["sentence"]).input_ids
             batch["input_length"] = len(audio_np)
             return batch
-
-        remove_cols = common_voice.column_names["train"]
-
-        # Training: stream on-the-fly
-        print("Setting up streaming training dataset...")
-        train_dataset = (
-            common_voice["train"]
-            .to_iterable_dataset(num_shards=max(1, train_len // 5000))
-            .map(prepare_dataset, remove_columns=remove_cols)
-            .filter(lambda x: x["input_length"] < max_input_length_samples)
-        )
-
-        # Eval: materialize in memory (test set is small)
-        print("Preprocessing eval dataset...")
-        eval_dataset = common_voice["test"].map(
-            prepare_dataset,
-            remove_columns=common_voice.column_names["test"],
-            keep_in_memory=True,
-        )
-        eval_dataset = eval_dataset.filter(
-            lambda x: x["input_length"] < max_input_length_samples,
-            keep_in_memory=True,
-        )
-        # Clean up helper column from eval
-        eval_dataset = eval_dataset.remove_columns(["input_length"])
-
     else:
-        # HF Hub or audiofolder — use built-in Audio decoding
         common_voice = common_voice.cast_column(
             "audio", Audio(sampling_rate=16000)
         )
@@ -405,22 +393,46 @@ def main():
             batch["input_length"] = len(audio["array"])
             return batch
 
-        remove_cols = common_voice.column_names["train"]
+    remove_cols_train = common_voice.column_names["train"]
+    remove_cols_test = common_voice.column_names["test"]
 
-        # Training: stream on-the-fly
+    if args.no_streaming:
+        # ---- Disk cache mode: preprocess everything upfront ----
+        print("Preprocessing training dataset (disk cache)...")
+        train_dataset = common_voice["train"].map(
+            prepare_dataset, remove_columns=remove_cols_train,
+        )
+        train_dataset = train_dataset.filter(
+            lambda x: x["input_length"] < max_input_length_samples
+        )
+        train_dataset = train_dataset.remove_columns(["input_length"])
+
+        print("Preprocessing eval dataset (disk cache)...")
+        eval_dataset = common_voice["test"].map(
+            prepare_dataset, remove_columns=remove_cols_test,
+        )
+        eval_dataset = eval_dataset.filter(
+            lambda x: x["input_length"] < max_input_length_samples
+        )
+        eval_dataset = eval_dataset.remove_columns(["input_length"])
+
+        train_len = len(train_dataset)
+        print(f"Train samples after filtering: {train_len}")
+        print(f"Eval samples after filtering: {len(eval_dataset)}")
+    else:
+        # ---- Streaming mode: process on-the-fly, no disk cache ----
         print("Setting up streaming training dataset...")
         train_dataset = (
             common_voice["train"]
             .to_iterable_dataset(num_shards=max(1, train_len // 5000))
-            .map(prepare_dataset, remove_columns=remove_cols)
+            .map(prepare_dataset, remove_columns=remove_cols_train)
             .filter(lambda x: x["input_length"] < max_input_length_samples)
         )
 
-        # Eval: materialize in memory
         print("Preprocessing eval dataset...")
         eval_dataset = common_voice["test"].map(
             prepare_dataset,
-            remove_columns=common_voice.column_names["test"],
+            remove_columns=remove_cols_test,
             keep_in_memory=True,
         )
         eval_dataset = eval_dataset.filter(
@@ -429,8 +441,8 @@ def main():
         )
         eval_dataset = eval_dataset.remove_columns(["input_length"])
 
-    print(f"Train samples (approx): {train_len}")
-    print(f"Eval samples: {len(eval_dataset)}")
+        print(f"Train samples (approx): {train_len}")
+        print(f"Eval samples: {len(eval_dataset)}")
 
     # -----------------------------------------------------------------------
     # 7. Load model
@@ -513,10 +525,14 @@ def main():
     # -----------------------------------------------------------------------
     # 10. Training arguments
     # -----------------------------------------------------------------------
-    # For IterableDataset, Trainer needs max_steps instead of num_train_epochs
-    # since it can't infer dataset length from a stream.
-    steps_per_epoch = train_len // (args.train_batch_size * args.grad_accum)
-    max_steps = steps_per_epoch * args.epochs
+    if args.no_streaming:
+        epoch_or_steps_args = {"num_train_epochs": args.epochs}
+    else:
+        steps_per_epoch = train_len // (args.train_batch_size * args.grad_accum)
+        max_steps = steps_per_epoch * args.epochs
+        epoch_or_steps_args = {"max_steps": max_steps}
+        print(f"Steps per epoch: {steps_per_epoch}")
+        print(f"Max steps: {max_steps}")
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
@@ -528,7 +544,7 @@ def main():
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
         warmup_steps=args.warmup,
-        max_steps=max_steps,
+        **epoch_or_steps_args,
         # Precision
         fp16=False,
         bf16=torch.cuda.is_available(),
@@ -555,9 +571,6 @@ def main():
         # Gradient
         max_grad_norm=1.0,
     )
-
-    print(f"Steps per epoch: {steps_per_epoch}")
-    print(f"Max steps: {max_steps}")
 
     # -----------------------------------------------------------------------
     # 11. Trainer
