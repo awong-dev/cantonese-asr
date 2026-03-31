@@ -589,6 +589,7 @@ def main():
         # Evaluation
         eval_strategy="steps",
         eval_steps=args.eval_steps,
+        eval_accumulation_steps=1,  # offload predictions to CPU to prevent OOM during eval
         # Logging
         logging_strategy="steps",
         logging_steps=100,

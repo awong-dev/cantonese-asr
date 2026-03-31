@@ -551,6 +551,7 @@ def main():
         # Evaluation
         eval_strategy="steps",
         eval_steps=args.eval_steps,
+        eval_accumulation_steps=1,  # offload predictions to CPU to prevent OOM during eval
         predict_with_generate=True,  # required for seq2seq metrics
         generation_max_length=225,
         # Logging
