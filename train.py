@@ -25,8 +25,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str,
                     default="facebook/wav2vec2-xls-r-1b")
 parser.add_argument('--unfreeze', action='store_true')
-parser.add_argument('--lr', type=float, default=3e-4)
-parser.add_argument('--warmup', type=int, default=500)
+parser.add_argument('--lr', type=float, default=5e-5)
+parser.add_argument('--warmup', type=int, default=1000)
 args = parser.parse_args()
 print(f"args: {args}")
 
@@ -45,7 +45,7 @@ common_voice_test = load_dataset(
     'csv',
     data_files=f'{DATASET_DIR}/test.tsv',
     delimiter="\t",
-    split="train[:10%]"
+    split="train"
 )
 
 # Remove unused columns - filter to only columns that actually exist
@@ -297,6 +297,8 @@ model = Wav2Vec2ForCTC.from_pretrained(
     vocab_size=len(processor.tokenizer),
 )
 
+model = torch.compile(model)
+
 if not args.unfreeze:
     model.freeze_feature_encoder()
 
@@ -305,18 +307,28 @@ if not args.unfreeze:
 # ---------------------------------------------------------------------------
 training_args = TrainingArguments(
     output_dir=OUT_MODEL_DIR,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=16,
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=4,
+    remove_unused_columns=False,
     eval_strategy="steps",
-    eval_steps=400,
-    num_train_epochs=40,
-    fp16=torch.cuda.is_available(),  # only enable on CUDA
+    eval_steps=1000,
+    num_train_epochs=15,
+    load_best_model_at_end=True,
+    metric_for_best_model="cer",
+    lr_scheduler_type="cosine",
+    greater_is_better=False,
+    # fp16=torch.cuda.is_available(),  # only enable on CUDA
+    fp16=False,
+    bf16=torch.cuda.is_available(),
     logging_strategy="steps",
     logging_steps=400,
     learning_rate=args.lr,
     warmup_steps=args.warmup,
-    save_steps=2376,  # every 3 epoch with batch_size 8
+    save_strategy="steps",
+    save_steps=1000,
     save_total_limit=3,
+    dataloader_num_workers=4,
+    dataloader_pin_memory=True,
 )
 
 trainer = Trainer(
@@ -329,4 +341,4 @@ trainer = Trainer(
     processing_class=processor.feature_extractor,
 )
 
-trainer.train(resume_from_checkpoint=True)
+trainer.train()
