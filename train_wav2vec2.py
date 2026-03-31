@@ -62,6 +62,28 @@ def parse_args():
         help="Use torch.compile (experimental, needs PyTorch 2.x)",
     )
 
+    # Regularization
+    parser.add_argument(
+        "--attention_dropout", type=float, default=0.1,
+        help="Attention dropout rate",
+    )
+    parser.add_argument(
+        "--hidden_dropout", type=float, default=0.1,
+        help="Hidden layer dropout rate",
+    )
+    parser.add_argument(
+        "--feat_proj_dropout", type=float, default=0.0,
+        help="Feature projection dropout rate",
+    )
+    parser.add_argument(
+        "--mask_time_prob", type=float, default=0.05,
+        help="Probability of masking time steps in spectrogram (higher = more regularization)",
+    )
+    parser.add_argument(
+        "--layerdrop", type=float, default=0.1,
+        help="Layer dropout rate (probability of dropping a transformer layer)",
+    )
+
     # Dataset
     parser.add_argument(
         "--dataset", type=str, default="mozilla-foundation/common_voice_17_0",
@@ -462,11 +484,11 @@ def main():
     print(f"Loading model: {args.model}")
     model = Wav2Vec2ForCTC.from_pretrained(
         args.model,
-        attention_dropout=0.1,
-        hidden_dropout=0.1,
-        feat_proj_dropout=0.0,
-        mask_time_prob=0.05,
-        layerdrop=0.1,
+        attention_dropout=args.attention_dropout,
+        hidden_dropout=args.hidden_dropout,
+        feat_proj_dropout=args.feat_proj_dropout,
+        mask_time_prob=args.mask_time_prob,
+        layerdrop=args.layerdrop,
         gradient_checkpointing=True,
         ctc_loss_reduction="mean",
         pad_token_id=processor.tokenizer.pad_token_id,

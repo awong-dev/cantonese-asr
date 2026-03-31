@@ -61,7 +61,19 @@ def parse_args():
     )
     parser.add_argument(
         "--dropout", type=float, default=0.0,
-        help="General dropout rate for encoder/decoder",
+        help="Dropout for all FC layers in embeddings, encoder, and decoder",
+    )
+    parser.add_argument(
+        "--activation_dropout", type=float, default=0.0,
+        help="Dropout for activations inside FC layers",
+    )
+    parser.add_argument(
+        "--encoder_layerdrop", type=float, default=0.0,
+        help="Encoder layer dropout probability",
+    )
+    parser.add_argument(
+        "--decoder_layerdrop", type=float, default=0.0,
+        help="Decoder layer dropout probability",
     )
     parser.add_argument(
         "--dataset",
@@ -427,8 +439,11 @@ def main():
     model = WhisperForConditionalGeneration.from_pretrained(
         args.model,
         use_cache=False,  # incompatible with gradient checkpointing
-        attention_dropout=args.attention_dropout,
         dropout=args.dropout,
+        attention_dropout=args.attention_dropout,
+        activation_dropout=args.activation_dropout,
+        encoder_layerdrop=args.encoder_layerdrop,
+        decoder_layerdrop=args.decoder_layerdrop,
     )
 
     # Set language and task for generation
