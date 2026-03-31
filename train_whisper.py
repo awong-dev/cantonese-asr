@@ -13,8 +13,6 @@ Requirements:
 
 import argparse
 import os
-import re
-import string
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,7 +102,7 @@ def parse_args():
         "--train_batch_size", type=int, default=4, help="Per-device train batch size"
     )
     parser.add_argument(
-        "--eval_batch_size", type=int, default=8, help="Per-device eval batch size"
+        "--eval_batch_size", type=int, default=None, help="Per-device eval batch size (default: same as train_batch_size)"
     )
     parser.add_argument(
         "--grad_accum", type=int, default=4, help="Gradient accumulation steps"
@@ -319,31 +317,11 @@ def main():
     print(f"Train samples: {len(common_voice['train'])}")
     print(f"Test samples: {len(common_voice['test'])}")
 
-    # -----------------------------------------------------------------------
-    # Text cleaning — strip punctuation for consistent CER evaluation
-    # -----------------------------------------------------------------------
-    chars_to_remove = re.compile(
-        r'[\丶\,\?\.\!\-\;\:"\"\%\'\"\�\．\⋯\！\－\：\–\。'
-        r'\》\,\）\,\？\；\～\~\…\︰\，\（\」\‧\《\﹔\、\—'
-        r'\／\,\「\﹖\·\']'
-    )
-
-    def clean_text(text: str) -> str:
-        text = chars_to_remove.sub("", text).lower().strip()
-        # Common Voice Cantonese quirk: lone ASCII "d" is colloquial 啲
-        if "d" in text:
-            ascii_letters = [c for c in text if c in string.ascii_lowercase]
-            if len(ascii_letters) == 1 and ascii_letters[0] == "d":
-                text = text.replace("d", "啲")
-        return text
-
-    print("Cleaning transcriptions...")
-
-    def apply_text_cleaning(batch):
-        batch["sentence"] = clean_text(batch["sentence"])
-        return batch
-
-    common_voice = common_voice.map(apply_text_cleaning)
+    # Note: Unlike wav2vec2 (CTC with custom char vocab), Whisper has its own
+    # tokenizer that handles punctuation, casing, and mixed scripts natively.
+    # Text cleaning/normalization is NOT applied here — it would force the
+    # model to unlearn its pretrained text distribution, causing divergence.
+    # CER is computed on the raw tokenizer output, which is standard for Whisper.
 
     # Shuffle and optionally subsample training set
     common_voice["train"] = common_voice["train"].shuffle(seed=args.seed)
@@ -364,20 +342,33 @@ def main():
         import torchaudio
         resamplers = {}
 
-        def prepare_dataset(batch):
-            filepath = os.path.join(_clips_dir, batch["path"])
+        def _load_audio(path):
+            filepath = os.path.join(_clips_dir, path)
             speech_array, sr = torchaudio.load(filepath)
             if sr != 16000:
                 if sr not in resamplers:
                     resamplers[sr] = torchaudio.transforms.Resample(sr, 16000)
                 speech_array = resamplers[sr](speech_array)
-            audio_np = speech_array.squeeze().numpy()
+            return speech_array.squeeze().numpy()
 
+        def prepare_dataset(batch):
+            audio_np = _load_audio(batch["path"])
             batch["input_features"] = feature_extractor(
                 audio_np, sampling_rate=16000,
             ).input_features[0]
             batch["labels"] = tokenizer(batch["sentence"]).input_ids
             batch["input_length"] = len(audio_np)
+            return batch
+
+        def prepare_dataset_batched(batch):
+            audio_arrays = [_load_audio(p) for p in batch["path"]]
+            batch["input_features"] = feature_extractor(
+                audio_arrays, sampling_rate=16000,
+            ).input_features
+            batch["labels"] = [
+                tokenizer(s).input_ids for s in batch["sentence"]
+            ]
+            batch["input_length"] = [len(a) for a in audio_arrays]
             return batch
     else:
         common_voice = common_voice.cast_column(
@@ -393,23 +384,40 @@ def main():
             batch["input_length"] = len(audio["array"])
             return batch
 
+        def prepare_dataset_batched(batch):
+            batch["input_features"] = feature_extractor(
+                [a["array"] for a in batch["audio"]],
+                sampling_rate=16000,
+            ).input_features
+            batch["labels"] = [
+                tokenizer(s).input_ids for s in batch["sentence"]
+            ]
+            batch["input_length"] = [len(a["array"]) for a in batch["audio"]]
+            return batch
+
     remove_cols_train = common_voice.column_names["train"]
     remove_cols_test = common_voice.column_names["test"]
 
     if args.no_streaming:
-        # ---- Disk cache mode: preprocess everything upfront ----
-        print("Preprocessing training dataset (disk cache)...")
+        # ---- Disk cache mode: preprocess everything upfront (batched) ----
+        print("Preprocessing training dataset (disk cache, batched)...")
         train_dataset = common_voice["train"].map(
-            prepare_dataset, remove_columns=remove_cols_train,
+            prepare_dataset_batched,
+            remove_columns=remove_cols_train,
+            batched=True,
+            batch_size=16,
         )
         train_dataset = train_dataset.filter(
             lambda x: x["input_length"] < max_input_length_samples
         )
         train_dataset = train_dataset.remove_columns(["input_length"])
 
-        print("Preprocessing eval dataset (disk cache)...")
+        print("Preprocessing eval dataset (disk cache, batched)...")
         eval_dataset = common_voice["test"].map(
-            prepare_dataset, remove_columns=remove_cols_test,
+            prepare_dataset_batched,
+            remove_columns=remove_cols_test,
+            batched=True,
+            batch_size=16,
         )
         eval_dataset = eval_dataset.filter(
             lambda x: x["input_length"] < max_input_length_samples
@@ -538,7 +546,7 @@ def main():
         output_dir=args.output_dir,
         # Batch / accumulation
         per_device_train_batch_size=args.train_batch_size,
-        per_device_eval_batch_size=args.eval_batch_size,
+        per_device_eval_batch_size=args.eval_batch_size or args.train_batch_size,
         gradient_accumulation_steps=args.grad_accum,
         # Schedule
         learning_rate=args.lr,
