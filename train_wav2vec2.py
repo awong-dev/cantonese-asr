@@ -115,8 +115,8 @@ def parse_args():
         help="Per-device train batch size",
     )
     parser.add_argument(
-        "--eval_batch_size", type=int, default=8,
-        help="Per-device eval batch size",
+        "--eval_batch_size", type=int, default=None,
+        help="Per-device eval batch size (default: same as train_batch_size)",
     )
     parser.add_argument(
         "--grad_accum", type=int, default=4,
@@ -576,7 +576,7 @@ def main():
         output_dir=args.output_dir,
         # Batch / accumulation
         per_device_train_batch_size=args.train_batch_size,
-        per_device_eval_batch_size=args.eval_batch_size,
+        per_device_eval_batch_size=args.eval_batch_size or args.train_batch_size,
         gradient_accumulation_steps=args.grad_accum,
         # Schedule
         learning_rate=args.lr,
@@ -589,7 +589,6 @@ def main():
         # Evaluation
         eval_strategy="steps",
         eval_steps=args.eval_steps,
-        eval_accumulation_steps=1,  # offload predictions to CPU to prevent OOM during eval
         # Logging
         logging_strategy="steps",
         logging_steps=100,
