@@ -15,12 +15,13 @@ import argparse
 import os
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import evaluate
 import torch
 import numpy as np
-from datasets import Audio, DatasetDict, load_dataset
+from datasets import Audio, DatasetDict, load_dataset, load_from_disk
 from transformers import (
     EarlyStoppingCallback,
     Seq2SeqTrainer,
@@ -181,40 +182,45 @@ def main():
     # -----------------------------------------------------------------------
     # 5. Load dataset
     # -----------------------------------------------------------------------
-    if args.dataset_path:
-        # Load from local directory.
-        # Supports two common layouts:
-        #   1. Arrow/parquet dataset saved via dataset.save_to_disk() or
-        #      downloaded with HF cache structure — pass the top-level dir
-        #   2. Directory containing train/validation/test subdirs with
-        #      audio files + metadata (CSV/TSV)
-        print(f"Loading dataset from local path: {args.dataset_path}")
-        from pathlib import Path
+    # Track whether we need manual audio loading (local TSV with path column)
+    _local_tsv_mode = False
+    _clips_dir = None
 
+    if args.dataset_path:
+        print(f"Loading dataset from local path: {args.dataset_path}")
         local_path = Path(args.dataset_path)
 
-        # Check if it looks like a HF-style dataset directory with split folders
-        has_split_dirs = (local_path / "train").exists() or (
-            local_path / "train.tsv"
-        ).exists()
-
         if (local_path / "dataset_dict.json").exists():
-            # Saved via save_to_disk()
-            from datasets import load_from_disk
+            # Previously saved via dataset.save_to_disk()
             common_voice = load_from_disk(str(local_path))
-        elif has_split_dirs:
-            # Standard Common Voice extracted archive layout:
-            #   /path/to/yue/train/ , /path/to/yue/test/ , etc.
+            if "train" in common_voice and "validation" in common_voice:
+                from datasets import concatenate_datasets
+                common_voice = DatasetDict({
+                    "train": concatenate_datasets([
+                        common_voice["train"], common_voice["validation"]
+                    ]),
+                    "test": common_voice["test"],
+                })
+        elif (local_path / "train.tsv").exists():
+            # Standard Common Voice extracted archive:
+            #   yue/clips/*.mp3, yue/train.tsv, yue/test.tsv, etc.
+            _clips_dir = str(local_path / "clips")
+            _local_tsv_mode = True
             common_voice = DatasetDict()
             common_voice["train"] = load_dataset(
-                "audiofolder",
-                data_dir=str(local_path),
-                split="train+validation",
+                "csv",
+                data_files=[
+                    str(local_path / "train.tsv"),
+                    str(local_path / "validated.tsv"),
+                ],
+                delimiter="\t",
+                split="train",
             )
             common_voice["test"] = load_dataset(
-                "audiofolder",
-                data_dir=str(local_path),
-                split="test",
+                "csv",
+                data_files=str(local_path / "test.tsv"),
+                delimiter="\t",
+                split="train",  # CSV loader only has "train" split
             )
         else:
             # Try loading as a generic HF dataset directory
@@ -230,18 +236,21 @@ def main():
         print(f"Loading dataset: {args.dataset} ({args.language})")
         common_voice = DatasetDict()
         common_voice["train"] = load_dataset(
-            args.dataset, args.language, split="train+validation", trust_remote_code=True
+            args.dataset, args.language, split="train+validation",
+            trust_remote_code=True,
         )
         common_voice["test"] = load_dataset(
-            args.dataset, args.language, split="test", trust_remote_code=True
+            args.dataset, args.language, split="test", trust_remote_code=True,
         )
 
-    # Remove unnecessary columns (keep only audio + sentence/text)
+    # Detect text column
     text_col = "sentence" if "sentence" in common_voice["train"].column_names else "text"
+
+    # Remove unnecessary columns — keep audio/path + text
+    audio_col = "audio" if "audio" in common_voice["train"].column_names else "path"
+    keep_cols = {audio_col, text_col}
     cols_to_remove = [
-        c
-        for c in common_voice["train"].column_names
-        if c not in ("audio", text_col)
+        c for c in common_voice["train"].column_names if c not in keep_cols
     ]
     if cols_to_remove:
         common_voice = common_voice.remove_columns(cols_to_remove)
@@ -250,45 +259,76 @@ def main():
     if text_col != "sentence":
         common_voice = common_voice.rename_column(text_col, "sentence")
 
-    # Resample to 16kHz
-    common_voice = common_voice.cast_column("audio", Audio(sampling_rate=16000))
-
     print(f"Train samples: {len(common_voice['train'])}")
     print(f"Test samples: {len(common_voice['test'])}")
 
     # -----------------------------------------------------------------------
     # 6. Preprocessing
     # -----------------------------------------------------------------------
-    max_input_length_samples = args.max_input_length * 16000  # 30s * 16kHz
+    max_input_length_samples = int(args.max_input_length * 16000)  # 30s * 16kHz
 
-    def prepare_dataset(batch):
-        audio = batch["audio"]
+    if _local_tsv_mode:
+        # Local TSV: "path" column with filenames in clips/ dir
+        import torchaudio
 
-        # Compute log-Mel spectrogram
-        batch["input_features"] = feature_extractor(
-            audio["array"], sampling_rate=audio["sampling_rate"]
-        ).input_features[0]
+        resamplers = {}
 
-        # Encode target text to label ids
-        batch["labels"] = tokenizer(batch["sentence"]).input_ids
-        return batch
+        def prepare_dataset(batch):
+            filepath = os.path.join(_clips_dir, batch["path"])
+            speech_array, sr = torchaudio.load(filepath)
+            if sr != 16000:
+                if sr not in resamplers:
+                    resamplers[sr] = torchaudio.transforms.Resample(sr, 16000)
+                speech_array = resamplers[sr](speech_array)
+            audio_np = speech_array.squeeze().numpy()
 
-    def is_audio_in_length_range(length):
-        return length < max_input_length_samples
+            # Skip samples longer than max_input_length
+            batch["is_valid"] = len(audio_np) < max_input_length_samples
 
-    print("Preprocessing dataset...")
-    common_voice = common_voice.map(
-        prepare_dataset,
-        remove_columns=common_voice.column_names["train"],
-        num_proc=1,  # audio processing doesn't benefit much from multiproc
-    )
+            batch["input_features"] = feature_extractor(
+                audio_np, sampling_rate=16000,
+            ).input_features[0]
+            batch["labels"] = tokenizer(batch["sentence"]).input_ids
+            return batch
 
-    # Filter out samples longer than 30s
-    common_voice["train"] = common_voice["train"].filter(
-        is_audio_in_length_range,
-        input_columns=["input_features"],
-        fn_kwargs=None,
-    )
+        print("Loading audio and extracting features...")
+        common_voice = common_voice.map(
+            prepare_dataset,
+            remove_columns=common_voice.column_names["train"],
+        )
+
+        # Filter out too-long samples
+        common_voice["train"] = common_voice["train"].filter(
+            lambda x: x["is_valid"]
+        )
+        common_voice = common_voice.remove_columns(["is_valid"])
+    else:
+        # HF Hub or audiofolder — use built-in Audio decoding
+        common_voice = common_voice.cast_column(
+            "audio", Audio(sampling_rate=16000)
+        )
+
+        def prepare_dataset(batch):
+            audio = batch["audio"]
+            batch["input_features"] = feature_extractor(
+                audio["array"], sampling_rate=audio["sampling_rate"],
+            ).input_features[0]
+            batch["labels"] = tokenizer(batch["sentence"]).input_ids
+            # Track length for filtering
+            batch["input_length"] = len(audio["array"])
+            return batch
+
+        print("Preprocessing dataset...")
+        common_voice = common_voice.map(
+            prepare_dataset,
+            remove_columns=common_voice.column_names["train"],
+        )
+
+        # Filter out samples longer than 30s
+        common_voice["train"] = common_voice["train"].filter(
+            lambda x: x["input_length"] < max_input_length_samples
+        )
+        common_voice = common_voice.remove_columns(["input_length"])
 
     print(f"Train samples after filtering: {len(common_voice['train'])}")
 
