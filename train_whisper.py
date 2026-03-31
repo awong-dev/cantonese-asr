@@ -63,6 +63,12 @@ def parse_args():
         default=None,
         help="Path to local Common Voice dataset directory (e.g. /data/common_voice/yue)",
     )
+    parser.add_argument(
+        "--train_tsv",
+        type=str,
+        default="train.tsv",
+        help="TSV file for training data: 'train.tsv' (default, smaller) or 'validated.tsv' (all validated samples)",
+    )
     parser.add_argument("--language", type=str, default="yue", help="Language code")
     parser.add_argument(
         "--language_full", type=str, default="cantonese", help="Full language name"
@@ -108,6 +114,18 @@ def parse_args():
         default=5,
         help="Early stopping patience (number of evals)",
     )
+    parser.add_argument(
+        "--max_train_samples",
+        type=int,
+        default=None,
+        help="Subsample training set to this many samples (shuffled). Useful for disk/memory constraints.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for shuffling and subsampling",
+    )
     return parser.parse_args()
 
 
@@ -131,16 +149,16 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         input_features = [
             {"input_features": f["input_features"]} for f in features
         ]
-        label_features = [{"input_ids": f["labels"]} for f in features
-
-        ]
+        label_features = [f["labels"] for f in features]
 
         batch = self.processor.feature_extractor.pad(
-            input_features, return_tensors="pt"
+            input_features, return_tensors="pt", return_attention_mask=True
         )
 
+        # Pad labels — pass as {"input_ids": [...]} which works with both
+        # fast and slow tokenizers without triggering the warning
         labels_batch = self.processor.tokenizer.pad(
-            label_features, return_tensors="pt"
+            {"input_ids": label_features}, return_tensors="pt"
         )
 
         # Replace padding token id with -100 so it's ignored in loss
@@ -201,7 +219,7 @@ def main():
                     ]),
                     "test": common_voice["test"],
                 })
-        elif (local_path / "train.tsv").exists():
+        elif (local_path / args.train_tsv).exists():
             # Standard Common Voice extracted archive:
             #   yue/clips/*.mp3, yue/train.tsv, yue/test.tsv, etc.
             _clips_dir = str(local_path / "clips")
@@ -209,10 +227,7 @@ def main():
             common_voice = DatasetDict()
             common_voice["train"] = load_dataset(
                 "csv",
-                data_files=[
-#                    str(local_path / "train.tsv"),
-                    str(local_path / "validated.tsv"),
-                ],
+                data_files=str(local_path / args.train_tsv),
                 delimiter="\t",
                 split="train",
             )
@@ -262,15 +277,26 @@ def main():
     print(f"Train samples: {len(common_voice['train'])}")
     print(f"Test samples: {len(common_voice['test'])}")
 
+    # Shuffle and optionally subsample training set
+    common_voice["train"] = common_voice["train"].shuffle(seed=args.seed)
+    if args.max_train_samples and args.max_train_samples < len(common_voice["train"]):
+        common_voice["train"] = common_voice["train"].select(
+            range(args.max_train_samples)
+        )
+        print(f"Subsampled to {args.max_train_samples} train samples")
+
     # -----------------------------------------------------------------------
-    # 6. Preprocessing
+    # 6. Preprocessing — on-the-fly for training, materialized for eval
     # -----------------------------------------------------------------------
+    # Training data is processed on-the-fly via IterableDataset to avoid
+    # caching gigabytes of mel spectrograms / waveforms to disk.
+    # Eval data is small enough to materialize in memory.
     max_input_length_samples = int(args.max_input_length * 16000)  # 30s * 16kHz
 
-    if _local_tsv_mode:
-        # Local TSV: "path" column with filenames in clips/ dir
-        import torchaudio
+    train_len = len(common_voice["train"])
 
+    if _local_tsv_mode:
+        import torchaudio
         resamplers = {}
 
         def prepare_dataset(batch):
@@ -282,26 +308,38 @@ def main():
                 speech_array = resamplers[sr](speech_array)
             audio_np = speech_array.squeeze().numpy()
 
-            # Skip samples longer than max_input_length
-            batch["is_valid"] = len(audio_np) < max_input_length_samples
-
             batch["input_features"] = feature_extractor(
                 audio_np, sampling_rate=16000,
             ).input_features[0]
             batch["labels"] = tokenizer(batch["sentence"]).input_ids
+            batch["input_length"] = len(audio_np)
             return batch
 
-        print("Loading audio and extracting features...")
-        common_voice = common_voice.map(
-            prepare_dataset,
-            remove_columns=common_voice.column_names["train"],
+        remove_cols = common_voice.column_names["train"]
+
+        # Training: stream on-the-fly
+        print("Setting up streaming training dataset...")
+        train_dataset = (
+            common_voice["train"]
+            .to_iterable_dataset(num_shards=max(1, train_len // 5000))
+            .map(prepare_dataset, remove_columns=remove_cols)
+            .filter(lambda x: x["input_length"] < max_input_length_samples)
         )
 
-        # Filter out too-long samples
-        common_voice["train"] = common_voice["train"].filter(
-            lambda x: x["is_valid"]
+        # Eval: materialize in memory (test set is small)
+        print("Preprocessing eval dataset...")
+        eval_dataset = common_voice["test"].map(
+            prepare_dataset,
+            remove_columns=common_voice.column_names["test"],
+            keep_in_memory=True,
         )
-        common_voice = common_voice.remove_columns(["is_valid"])
+        eval_dataset = eval_dataset.filter(
+            lambda x: x["input_length"] < max_input_length_samples,
+            keep_in_memory=True,
+        )
+        # Clean up helper column from eval
+        eval_dataset = eval_dataset.remove_columns(["input_length"])
+
     else:
         # HF Hub or audiofolder — use built-in Audio decoding
         common_voice = common_voice.cast_column(
@@ -314,23 +352,35 @@ def main():
                 audio["array"], sampling_rate=audio["sampling_rate"],
             ).input_features[0]
             batch["labels"] = tokenizer(batch["sentence"]).input_ids
-            # Track length for filtering
             batch["input_length"] = len(audio["array"])
             return batch
 
-        print("Preprocessing dataset...")
-        common_voice = common_voice.map(
+        remove_cols = common_voice.column_names["train"]
+
+        # Training: stream on-the-fly
+        print("Setting up streaming training dataset...")
+        train_dataset = (
+            common_voice["train"]
+            .to_iterable_dataset(num_shards=max(1, train_len // 5000))
+            .map(prepare_dataset, remove_columns=remove_cols)
+            .filter(lambda x: x["input_length"] < max_input_length_samples)
+        )
+
+        # Eval: materialize in memory
+        print("Preprocessing eval dataset...")
+        eval_dataset = common_voice["test"].map(
             prepare_dataset,
-            remove_columns=common_voice.column_names["train"],
+            remove_columns=common_voice.column_names["test"],
+            keep_in_memory=True,
         )
-
-        # Filter out samples longer than 30s
-        common_voice["train"] = common_voice["train"].filter(
-            lambda x: x["input_length"] < max_input_length_samples
+        eval_dataset = eval_dataset.filter(
+            lambda x: x["input_length"] < max_input_length_samples,
+            keep_in_memory=True,
         )
-        common_voice = common_voice.remove_columns(["input_length"])
+        eval_dataset = eval_dataset.remove_columns(["input_length"])
 
-    print(f"Train samples after filtering: {len(common_voice['train'])}")
+    print(f"Train samples (approx): {train_len}")
+    print(f"Eval samples: {len(eval_dataset)}")
 
     # -----------------------------------------------------------------------
     # 7. Load model
@@ -377,19 +427,42 @@ def main():
         pred_ids = pred.predictions
         label_ids = pred.label_ids
 
+        # predict_with_generate can return a tuple (ids, scores)
+        if isinstance(pred_ids, tuple):
+            pred_ids = pred_ids[0]
+
         # Replace -100 with pad token id for decoding
-        label_ids[label_ids == -100] = tokenizer.pad_token_id
+        label_ids = np.where(label_ids == -100, tokenizer.pad_token_id, label_ids)
+        # Also handle -100 in predictions (shouldn't happen, but just in case)
+        pred_ids = np.where(pred_ids == -100, tokenizer.pad_token_id, pred_ids)
 
         pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
 
-        cer = cer_metric.compute(predictions=pred_str, references=label_str)
+        # Filter out empty pairs to avoid division by zero in CER
+        pairs = [(p, l) for p, l in zip(pred_str, label_str) if len(l.strip()) > 0]
+        if not pairs:
+            return {"cer": 1.0}
+        pred_str, label_str = zip(*pairs)
+
+        cer = cer_metric.compute(predictions=list(pred_str), references=list(label_str))
+
+        # Log a few examples for debugging
+        for i in range(min(3, len(pred_str))):
+            print(f"  REF: {label_str[i][:80]}")
+            print(f"  HYP: {pred_str[i][:80]}")
+            print()
 
         return {"cer": cer}
 
     # -----------------------------------------------------------------------
     # 10. Training arguments
     # -----------------------------------------------------------------------
+    # For IterableDataset, Trainer needs max_steps instead of num_train_epochs
+    # since it can't infer dataset length from a stream.
+    steps_per_epoch = train_len // (args.train_batch_size * args.grad_accum)
+    max_steps = steps_per_epoch * args.epochs
+
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
         # Batch / accumulation
@@ -400,7 +473,7 @@ def main():
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
         warmup_steps=args.warmup,
-        num_train_epochs=args.epochs,
+        max_steps=max_steps,
         # Precision
         fp16=False,
         bf16=torch.cuda.is_available(),
@@ -428,14 +501,17 @@ def main():
         max_grad_norm=1.0,
     )
 
+    print(f"Steps per epoch: {steps_per_epoch}")
+    print(f"Max steps: {max_steps}")
+
     # -----------------------------------------------------------------------
     # 11. Trainer
     # -----------------------------------------------------------------------
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
-        train_dataset=common_voice["train"],
-        eval_dataset=common_voice["test"],
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
         processing_class=processor.feature_extractor,

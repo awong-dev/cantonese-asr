@@ -72,6 +72,10 @@ def parse_args():
         help="Path to local Common Voice dataset (e.g. data/cv-corpus-25.0/yue)",
     )
     parser.add_argument(
+        "--train_tsv", type=str, default="train.tsv",
+        help="TSV file for training data: 'train.tsv' (default, smaller) or 'validated.tsv' (all validated samples)",
+    )
+    parser.add_argument(
         "--language", type=str, default="yue",
         help="Language code for HF Hub loading",
     )
@@ -101,6 +105,14 @@ def parse_args():
     parser.add_argument(
         "--early_stopping_patience", type=int, default=5,
         help="Early stopping patience (number of evals without improvement)",
+    )
+    parser.add_argument(
+        "--max_train_samples", type=int, default=None,
+        help="Subsample training set to this many samples (shuffled). Useful for disk/memory constraints.",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Random seed for shuffling and subsampling",
     )
 
     # Output
@@ -196,7 +208,7 @@ def main():
     print(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
-        gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1e9
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
         print(f"VRAM: {gpu_mem:.1f} GB")
 
     # -----------------------------------------------------------------------
@@ -217,17 +229,14 @@ def main():
                     ]),
                     "test": common_voice["test"],
                 })
-        elif (local_path / "train.tsv").exists():
+        elif (local_path / args.train_tsv).exists():
             # Standard Common Voice extracted archive:
             #   yue/clips/*.mp3, yue/train.tsv, yue/test.tsv, etc.
             clips_dir = str(local_path / "clips")
             common_voice = DatasetDict()
             common_voice["train"] = load_dataset(
                 "csv",
-                data_files=[
-#                    str(local_path / "train.tsv"),
-                    str(local_path / "validated.tsv"),
-                ],
+                data_files=str(local_path / args.train_tsv),
                 delimiter="\t",
                 split="train",
             )
@@ -276,6 +285,14 @@ def main():
 
     print(f"Train samples: {len(common_voice['train'])}")
     print(f"Test samples: {len(common_voice['test'])}")
+
+    # Shuffle and optionally subsample training set
+    common_voice["train"] = common_voice["train"].shuffle(seed=args.seed)
+    if args.max_train_samples and args.max_train_samples < len(common_voice["train"]):
+        common_voice["train"] = common_voice["train"].select(
+            range(args.max_train_samples)
+        )
+        print(f"Subsampled to {args.max_train_samples} train samples")
 
     # -----------------------------------------------------------------------
     # 7. Text preprocessing + vocabulary
@@ -346,7 +363,11 @@ def main():
     # -----------------------------------------------------------------------
     # 9. Audio loading + feature extraction
     # -----------------------------------------------------------------------
+    # Training data is processed on-the-fly via IterableDataset to avoid
+    # caching gigabytes of processed audio to disk.
+    # Eval data is small enough to materialize in memory.
     has_audio_column = "audio" in common_voice["train"].column_names
+    train_len = len(common_voice["train"])
 
     if has_audio_column:
         # HF Hub datasets or audiofolder — use built-in Audio decoding
@@ -364,10 +385,22 @@ def main():
             ).input_ids
             return batch
 
-        print("Extracting features...")
-        common_voice = common_voice.map(
+        remove_cols = common_voice.column_names["train"]
+
+        # Training: stream on-the-fly
+        print("Setting up streaming training dataset...")
+        train_dataset = (
+            common_voice["train"]
+            .to_iterable_dataset(num_shards=max(1, train_len // 5000))
+            .map(prepare_features, remove_columns=remove_cols)
+        )
+
+        # Eval: materialize in memory
+        print("Preprocessing eval dataset...")
+        eval_dataset = common_voice["test"].map(
             prepare_features,
-            remove_columns=common_voice.column_names["train"],
+            remove_columns=common_voice.column_names["test"],
+            keep_in_memory=True,
         )
     else:
         # Local TSV layout — "path" column with filenames in clips/ dir
@@ -400,14 +433,26 @@ def main():
             ).input_ids
             return batch
 
-        print("Loading audio and extracting features...")
-        common_voice = common_voice.map(
-            prepare_features_from_path,
-            remove_columns=common_voice.column_names["train"],
+        remove_cols = common_voice.column_names["train"]
+
+        # Training: stream on-the-fly
+        print("Setting up streaming training dataset...")
+        train_dataset = (
+            common_voice["train"]
+            .to_iterable_dataset(num_shards=max(1, train_len // 5000))
+            .map(prepare_features_from_path, remove_columns=remove_cols)
         )
 
-    print(f"Train features: {len(common_voice['train'])}")
-    print(f"Test features: {len(common_voice['test'])}")
+        # Eval: materialize in memory
+        print("Preprocessing eval dataset...")
+        eval_dataset = common_voice["test"].map(
+            prepare_features_from_path,
+            remove_columns=common_voice.column_names["test"],
+            keep_in_memory=True,
+        )
+
+    print(f"Train samples (approx): {train_len}")
+    print(f"Eval samples: {len(eval_dataset)}")
 
     # -----------------------------------------------------------------------
     # 10. Load model
@@ -462,6 +507,10 @@ def main():
     # -----------------------------------------------------------------------
     # 12. Training arguments
     # -----------------------------------------------------------------------
+    # For IterableDataset, Trainer needs max_steps instead of num_train_epochs
+    steps_per_epoch = train_len // (args.train_batch_size * args.grad_accum)
+    max_steps = steps_per_epoch * args.epochs
+
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         # Batch / accumulation
@@ -472,7 +521,7 @@ def main():
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
         warmup_steps=args.warmup,
-        num_train_epochs=args.epochs,
+        max_steps=max_steps,
         # Precision
         fp16=False,
         bf16=torch.cuda.is_available(),
@@ -498,6 +547,9 @@ def main():
         max_grad_norm=1.0,
     )
 
+    print(f"Steps per epoch: {steps_per_epoch}")
+    print(f"Max steps: {max_steps}")
+
     # -----------------------------------------------------------------------
     # 13. Trainer
     # -----------------------------------------------------------------------
@@ -509,8 +561,8 @@ def main():
     trainer = TrainerClass(
         model=model,
         args=training_args,
-        train_dataset=common_voice["train"],
-        eval_dataset=common_voice["test"],
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
         processing_class=processor.feature_extractor,
