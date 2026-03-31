@@ -238,6 +238,8 @@ def main():
     # -----------------------------------------------------------------------
     # 6. Load dataset
     # -----------------------------------------------------------------------
+    _local_clips_dir = None  # set when loading local TSV layout
+
     if args.dataset_path:
         print(f"Loading dataset from local path: {args.dataset_path}")
         local_path = Path(args.dataset_path)
@@ -256,7 +258,7 @@ def main():
         elif (local_path / args.train_tsv).exists():
             # Standard Common Voice extracted archive:
             #   yue/clips/*.mp3, yue/train.tsv, yue/test.tsv, etc.
-            clips_dir = str(local_path / "clips")
+            _local_clips_dir = str(local_path / "clips")
             common_voice = DatasetDict()
             common_voice["train"] = load_dataset(
                 "csv",
@@ -270,8 +272,6 @@ def main():
                 delimiter="\t",
                 split="train",  # CSV loader only has "train" split
             )
-            # Store clips_dir for audio loading later
-            common_voice._clips_dir = clips_dir
         else:
             common_voice = DatasetDict()
             common_voice["train"] = load_dataset(
@@ -430,8 +430,7 @@ def main():
         # Local TSV layout — "path" column with filenames in clips/ dir
         import torchaudio
 
-        clips_dir = getattr(common_voice, "_clips_dir", None)
-        if clips_dir is None:
+        if _local_clips_dir is None:
             raise ValueError(
                 "Dataset has 'path' column but no clips directory found. "
                 "Use --dataset_path pointing to the Common Voice language dir."
@@ -441,7 +440,7 @@ def main():
         resamplers = {}
 
         def prepare_features_from_path(batch):
-            filepath = os.path.join(clips_dir, batch["path"])
+            filepath = os.path.join(_local_clips_dir, batch["path"])
             speech_array, sr = torchaudio.load(filepath)
             if sr != 16000:
                 if sr not in resamplers:
