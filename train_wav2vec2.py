@@ -429,7 +429,20 @@ def main():
             batch["input_length"] = len(audio["array"])
             return batch
 
+        def prepare_features_batched(batch):
+            batch["input_values"] = processor(
+                [a["array"] for a in batch["audio"]],
+                sampling_rate=16000,
+                padding=False,
+            ).input_values
+            batch["labels"] = [
+                processor.tokenizer(s).input_ids for s in batch["sentence"]
+            ]
+            batch["input_length"] = [len(a["array"]) for a in batch["audio"]]
+            return batch
+
         prepare_fn = prepare_features
+        prepare_fn_batched = prepare_features_batched
     else:
         import torchaudio
 
@@ -441,15 +454,17 @@ def main():
 
         resamplers = {}
 
-        def prepare_features_from_path(batch):
-            filepath = os.path.join(_local_clips_dir, batch["path"])
+        def _load_audio(path):
+            filepath = os.path.join(_local_clips_dir, path)
             speech_array, sr = torchaudio.load(filepath)
             if sr != 16000:
                 if sr not in resamplers:
                     resamplers[sr] = torchaudio.transforms.Resample(sr, 16000)
                 speech_array = resamplers[sr](speech_array)
-            audio_np = speech_array.squeeze().numpy()
+            return speech_array.squeeze().numpy()
 
+        def prepare_features_from_path(batch):
+            audio_np = _load_audio(batch["path"])
             batch["input_values"] = processor(
                 audio_np, sampling_rate=16000,
             ).input_values[0]
@@ -459,27 +474,44 @@ def main():
             batch["input_length"] = len(audio_np)
             return batch
 
+        def prepare_features_from_path_batched(batch):
+            audio_arrays = [_load_audio(p) for p in batch["path"]]
+            batch["input_values"] = processor(
+                audio_arrays, sampling_rate=16000,
+                padding=False,
+            ).input_values
+            batch["labels"] = [
+                processor.tokenizer(s).input_ids for s in batch["sentence"]
+            ]
+            batch["input_length"] = [len(a) for a in audio_arrays]
+            return batch
+
         prepare_fn = prepare_features_from_path
+        prepare_fn_batched = prepare_features_from_path_batched
 
     remove_cols_train = common_voice.column_names["train"]
     remove_cols_test = common_voice.column_names["test"]
 
     if args.no_streaming:
-        # ---- Disk cache mode: preprocess everything upfront ----
-        print("Preprocessing training dataset (disk cache)...")
+        # ---- Disk cache mode: preprocess everything upfront (batched) ----
+        print("Preprocessing training dataset (disk cache, batched)...")
         train_dataset = common_voice["train"].map(
-            prepare_fn,
+            prepare_fn_batched,
             remove_columns=remove_cols_train,
+            batched=True,
+            batch_size=16,
         )
         train_dataset = train_dataset.filter(
             lambda x: x["input_length"] < max_input_samples
         )
         train_dataset = train_dataset.remove_columns(["input_length"])
 
-        print("Preprocessing eval dataset (disk cache)...")
+        print("Preprocessing eval dataset (disk cache, batched)...")
         eval_dataset = common_voice["test"].map(
-            prepare_fn,
+            prepare_fn_batched,
             remove_columns=remove_cols_test,
+            batched=True,
+            batch_size=16,
         )
         eval_dataset = eval_dataset.filter(
             lambda x: x["input_length"] < max_input_samples
