@@ -210,7 +210,7 @@ def main():
             common_voice["train"] = load_dataset(
                 "csv",
                 data_files=[
-                    str(local_path / "train.tsv"),
+#                    str(local_path / "train.tsv"),
                     str(local_path / "validated.tsv"),
                 ],
                 delimiter="\t",
