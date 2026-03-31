@@ -13,6 +13,8 @@ Requirements:
 
 import argparse
 import os
+import re
+import string
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -276,6 +278,32 @@ def main():
 
     print(f"Train samples: {len(common_voice['train'])}")
     print(f"Test samples: {len(common_voice['test'])}")
+
+    # -----------------------------------------------------------------------
+    # Text cleaning — strip punctuation for consistent CER evaluation
+    # -----------------------------------------------------------------------
+    chars_to_remove = re.compile(
+        r'[\丶\,\?\.\!\-\;\:"\"\%\'\"\�\．\⋯\！\－\：\–\。'
+        r'\》\,\）\,\？\；\～\~\…\︰\，\（\」\‧\《\﹔\、\—'
+        r'\／\,\「\﹖\·\']'
+    )
+
+    def clean_text(text: str) -> str:
+        text = chars_to_remove.sub("", text).lower().strip()
+        # Common Voice Cantonese quirk: lone ASCII "d" is colloquial 啲
+        if "d" in text:
+            ascii_letters = [c for c in text if c in string.ascii_lowercase]
+            if len(ascii_letters) == 1 and ascii_letters[0] == "d":
+                text = text.replace("d", "啲")
+        return text
+
+    print("Cleaning transcriptions...")
+
+    def apply_text_cleaning(batch):
+        batch["sentence"] = clean_text(batch["sentence"])
+        return batch
+
+    common_voice = common_voice.map(apply_text_cleaning)
 
     # Shuffle and optionally subsample training set
     common_voice["train"] = common_voice["train"].shuffle(seed=args.seed)
