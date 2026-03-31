@@ -469,11 +469,10 @@ def main():
     # Set language and task for generation
     model.generation_config.language = args.language_full
     model.generation_config.task = "transcribe"
-    # Build forced_decoder_ids from the tokenizer so the model always
-    # starts generation with the correct language + task tokens
-    model.generation_config.forced_decoder_ids = processor.get_decoder_prompt_ids(
-        language=args.language_full, task="transcribe"
-    )
+    # Note: forced_decoder_ids is set to None so the model uses the language/task
+    # tokens from generation_config. Setting forced_decoder_ids explicitly can
+    # conflict with how labels are tokenized during training.
+    model.generation_config.forced_decoder_ids = None
 
     # Enable gradient checkpointing to save VRAM
     model.config.use_cache = False
