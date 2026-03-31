@@ -54,7 +54,13 @@ def parse_args():
         "--dataset",
         type=str,
         default="mozilla-foundation/common_voice_17_0",
-        help="HuggingFace dataset ID",
+        help="HuggingFace dataset ID (used when --dataset_path is not set)",
+    )
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        default=None,
+        help="Path to local Common Voice dataset directory (e.g. /data/common_voice/yue)",
     )
     parser.add_argument("--language", type=str, default="yue", help="Language code")
     parser.add_argument(
@@ -175,22 +181,74 @@ def main():
     # -----------------------------------------------------------------------
     # 5. Load dataset
     # -----------------------------------------------------------------------
-    print(f"Loading dataset: {args.dataset} ({args.language})")
-    common_voice = DatasetDict()
-    common_voice["train"] = load_dataset(
-        args.dataset, args.language, split="train+validation", trust_remote_code=True
-    )
-    common_voice["test"] = load_dataset(
-        args.dataset, args.language, split="test", trust_remote_code=True
-    )
+    if args.dataset_path:
+        # Load from local directory.
+        # Supports two common layouts:
+        #   1. Arrow/parquet dataset saved via dataset.save_to_disk() or
+        #      downloaded with HF cache structure — pass the top-level dir
+        #   2. Directory containing train/validation/test subdirs with
+        #      audio files + metadata (CSV/TSV)
+        print(f"Loading dataset from local path: {args.dataset_path}")
+        from pathlib import Path
 
-    # Remove unnecessary columns
+        local_path = Path(args.dataset_path)
+
+        # Check if it looks like a HF-style dataset directory with split folders
+        has_split_dirs = (local_path / "train").exists() or (
+            local_path / "train.tsv"
+        ).exists()
+
+        if (local_path / "dataset_dict.json").exists():
+            # Saved via save_to_disk()
+            from datasets import load_from_disk
+            common_voice = load_from_disk(str(local_path))
+        elif has_split_dirs:
+            # Standard Common Voice extracted archive layout:
+            #   /path/to/yue/train/ , /path/to/yue/test/ , etc.
+            common_voice = DatasetDict()
+            common_voice["train"] = load_dataset(
+                "audiofolder",
+                data_dir=str(local_path),
+                split="train+validation",
+            )
+            common_voice["test"] = load_dataset(
+                "audiofolder",
+                data_dir=str(local_path),
+                split="test",
+            )
+        else:
+            # Try loading as a generic HF dataset directory
+            common_voice = DatasetDict()
+            common_voice["train"] = load_dataset(
+                str(local_path), split="train+validation", trust_remote_code=True
+            )
+            common_voice["test"] = load_dataset(
+                str(local_path), split="test", trust_remote_code=True
+            )
+    else:
+        # Load from HuggingFace Hub
+        print(f"Loading dataset: {args.dataset} ({args.language})")
+        common_voice = DatasetDict()
+        common_voice["train"] = load_dataset(
+            args.dataset, args.language, split="train+validation", trust_remote_code=True
+        )
+        common_voice["test"] = load_dataset(
+            args.dataset, args.language, split="test", trust_remote_code=True
+        )
+
+    # Remove unnecessary columns (keep only audio + sentence/text)
+    text_col = "sentence" if "sentence" in common_voice["train"].column_names else "text"
     cols_to_remove = [
         c
         for c in common_voice["train"].column_names
-        if c not in ("audio", "sentence")
+        if c not in ("audio", text_col)
     ]
-    common_voice = common_voice.remove_columns(cols_to_remove)
+    if cols_to_remove:
+        common_voice = common_voice.remove_columns(cols_to_remove)
+
+    # Normalize text column name to "sentence"
+    if text_col != "sentence":
+        common_voice = common_voice.rename_column(text_col, "sentence")
 
     # Resample to 16kHz
     common_voice = common_voice.cast_column("audio", Audio(sampling_rate=16000))
