@@ -53,6 +53,16 @@ def parse_args():
         default="openai/whisper-large-v3-turbo",
         help="HuggingFace model ID",
     )
+
+    # Regularization
+    parser.add_argument(
+        "--attention_dropout", type=float, default=0.0,
+        help="Attention dropout rate",
+    )
+    parser.add_argument(
+        "--dropout", type=float, default=0.0,
+        help="General dropout rate for encoder/decoder",
+    )
     parser.add_argument(
         "--dataset",
         type=str,
@@ -417,6 +427,8 @@ def main():
     model = WhisperForConditionalGeneration.from_pretrained(
         args.model,
         use_cache=False,  # incompatible with gradient checkpointing
+        attention_dropout=args.attention_dropout,
+        dropout=args.dropout,
     )
 
     # Set language and task for generation
