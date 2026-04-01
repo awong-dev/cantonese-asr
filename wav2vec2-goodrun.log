@@ -1,0 +1,164 @@
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+  0%|                                                                                                                                                                          | 0/186450 [00:00<?, ?it/s]/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 17.9434, 'grad_norm': 12.339142799377441, 'learning_rate': 1.995e-05, 'epoch': 0.03}
+{'loss': 5.7144, 'grad_norm': 10.728793144226074, 'learning_rate': 3.995e-05, 'epoch': 0.06}
+{'eval_loss': 2.987046718597412, 'eval_cer': 0.9587281575772364, 'eval_runtime': 119.283, 'eval_samples_per_second': 43.007, 'eval_steps_per_second': 5.382, 'epoch': 0.08}
+  1%|▊                                                                                                                                                           | 1000/186450 [20:51<61:22:32,  1.19s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 3.0463, 'grad_norm': 4.093603610992432, 'learning_rate': 4.999985794326636e-05, 'epoch': 0.1}
+{'loss': 2.788, 'grad_norm': 3.2544643878936768, 'learning_rate': 4.9998712918638245e-05, 'epoch': 0.13}
+{'loss': 1.3372, 'grad_norm': 4.155796527862549, 'learning_rate': 4.999642005219927e-05, 'epoch': 0.16}
+{'eval_loss': 0.726408839225769, 'eval_cer': 0.23115349682107175, 'eval_runtime': 106.4488, 'eval_samples_per_second': 48.192, 'eval_steps_per_second': 6.031, 'epoch': 0.16}
+  1%|█▋                                                                                                                                                          | 2000/186450 [41:40<62:19:03,  1.22s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+  1%|█▊                                                                                                                                                          | 2220/186450 [46:06<54:13:49,  1.06s/it]{'loss': 0.9962, 'grad_norm': 7.12299108505249, 'learning_rate': 4.999297944922875e-05, 'epoch': 0.19}
+{'loss': 0.8324, 'grad_norm': 4.4718337059021, 'learning_rate': 4.998839126770555e-05, 'epoch': 0.23}
+{'eval_loss': 0.4880114197731018, 'eval_cer': 0.197079995119769, 'eval_runtime': 106.3256, 'eval_samples_per_second': 48.248, 'eval_steps_per_second': 6.038, 'epoch': 0.24}
+  2%|██▍                                                                                                                                                       | 3000/186450 [1:02:26<54:30:16,  1.07s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.7451, 'grad_norm': 6.222044944763184, 'learning_rate': 4.9982655718300773e-05, 'epoch': 0.26}
+{'loss': 0.6842, 'grad_norm': 2.3291561603546143, 'learning_rate': 4.997577306436812e-05, 'epoch': 0.29}
+{'loss': 0.6338, 'grad_norm': 4.05808162689209, 'learning_rate': 4.996774362193177e-05, 'epoch': 0.32}
+{'eval_loss': 0.44392645359039307, 'eval_cer': 0.1698727073081459, 'eval_runtime': 106.2945, 'eval_samples_per_second': 48.262, 'eval_steps_per_second': 6.04, 'epoch': 0.32}
+  2%|███▎                                                                                                                                                      | 4000/186450 [1:23:31<60:54:29,  1.20s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.6001, 'grad_norm': 3.076855182647705, 'learning_rate': 4.9958567759671896e-05, 'epoch': 0.35}
+{'loss': 0.5847, 'grad_norm': 2.843632221221924, 'learning_rate': 4.994824589890773e-05, 'epoch': 0.39}
+{'eval_loss': 0.4070400893688202, 'eval_cer': 0.15868884460531132, 'eval_runtime': 106.1802, 'eval_samples_per_second': 48.314, 'eval_steps_per_second': 6.046, 'epoch': 0.4}
+  3%|████▏                                                                                                                                                     | 5000/186450 [1:44:19<57:00:27,  1.13s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.576, 'grad_norm': 9.81485366821289, 'learning_rate': 4.99367785135782e-05, 'epoch': 0.42}
+{'loss': 0.561, 'grad_norm': 5.109342098236084, 'learning_rate': 4.992416613022019e-05, 'epoch': 0.45}
+{'loss': 0.5604, 'grad_norm': 3.306788682937622, 'learning_rate': 4.991040932794435e-05, 'epoch': 0.48}
+{'eval_loss': 0.35679543018341064, 'eval_cer': 0.1444141689373297, 'eval_runtime': 106.1478, 'eval_samples_per_second': 48.329, 'eval_steps_per_second': 6.048, 'epoch': 0.48}
+  3%|████▉                                                                                                                                                     | 6000/186450 [2:05:14<57:06:21,  1.14s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5284, 'grad_norm': 21.736839294433594, 'learning_rate': 4.989550873840851e-05, 'epoch': 0.51}
+{'loss': 0.5206, 'grad_norm': 2.4725394248962402, 'learning_rate': 4.98794650457887e-05, 'epoch': 0.55}
+{'eval_loss': 0.33422327041625977, 'eval_cer': 0.13785296948500006, 'eval_runtime': 106.1481, 'eval_samples_per_second': 48.329, 'eval_steps_per_second': 6.048, 'epoch': 0.56}
+  4%|█████▊                                                                                                                                                    | 7000/186450 [2:26:05<52:37:10,  1.06s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5154, 'grad_norm': 2.411966562271118, 'learning_rate': 4.986227898674767e-05, 'epoch': 0.58}
+{'loss': 0.5029, 'grad_norm': 7.2911224365234375, 'learning_rate': 4.984395135040114e-05, 'epoch': 0.61}
+{'loss': 0.4982, 'grad_norm': 5.63398551940918, 'learning_rate': 4.982448297828152e-05, 'epoch': 0.64}
+{'eval_loss': 0.33128294348716736, 'eval_cer': 0.1336031016579229, 'eval_runtime': 106.386, 'eval_samples_per_second': 48.221, 'eval_steps_per_second': 6.035, 'epoch': 0.64}
+  4%|██████▌                                                                                                                                                   | 8000/186450 [2:46:52<53:09:54,  1.07s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4858, 'grad_norm': 2.289055109024048, 'learning_rate': 4.980387476429931e-05, 'epoch': 0.68}
+{'loss': 0.5244, 'grad_norm': 16.988571166992188, 'learning_rate': 4.978212765470199e-05, 'epoch': 0.71}
+{'eval_loss': 0.3799286484718323, 'eval_cer': 0.15027722423305814, 'eval_runtime': 106.4104, 'eval_samples_per_second': 48.21, 'eval_steps_per_second': 6.033, 'epoch': 0.72}
+  5%|███████▍                                                                                                                                                  | 9000/186450 [3:07:41<57:37:52,  1.17s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5186, 'grad_norm': 22.85993194580078, 'learning_rate': 4.975924264803065e-05, 'epoch': 0.74}
+{'loss': 0.517, 'grad_norm': 3.871312379837036, 'learning_rate': 4.973522079507409e-05, 'epoch': 0.77}
+{'loss': 0.4897, 'grad_norm': 6.4820380210876465, 'learning_rate': 4.971006319882057e-05, 'epoch': 0.8}
+{'eval_loss': 0.3985244035720825, 'eval_cer': 0.15700109805197446, 'eval_runtime': 105.9599, 'eval_samples_per_second': 48.415, 'eval_steps_per_second': 6.059, 'epoch': 0.8}
+  5%|████████▏                                                                                                                                                | 10000/186450 [3:28:28<54:13:02,  1.11s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4806, 'grad_norm': 7.492556095123291, 'learning_rate': 4.96837710144072e-05, 'epoch': 0.84}
+{'loss': 0.5002, 'grad_norm': 27.24779510498047, 'learning_rate': 4.9656345449066874e-05, 'epoch': 0.87}
+{'eval_loss': 0.33088526129722595, 'eval_cer': 0.15083980641750377, 'eval_runtime': 106.1418, 'eval_samples_per_second': 48.332, 'eval_steps_per_second': 6.049, 'epoch': 0.88}
+  6%|█████████                                                                                                                                                | 11000/186450 [3:49:17<56:50:42,  1.17s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4728, 'grad_norm': 6.4959611892700195, 'learning_rate': 4.962778776207285e-05, 'epoch': 0.9}
+{'loss': 0.4941, 'grad_norm': 7.690654754638672, 'learning_rate': 4.959809926468093e-05, 'epoch': 0.93}
+{'loss': 0.517, 'grad_norm': 5.804001808166504, 'learning_rate': 4.956728132006922e-05, 'epoch': 0.97}
+{'eval_loss': 0.342062771320343, 'eval_cer': 0.16309460870036738, 'eval_runtime': 106.031, 'eval_samples_per_second': 48.382, 'eval_steps_per_second': 6.055, 'epoch': 0.97}
+  6%|█████████▊                                                                                                                                               | 12000/186450 [4:10:16<55:52:13,  1.15s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4812, 'grad_norm': 30.38030242919922, 'learning_rate': 4.953533534327559e-05, 'epoch': 1.0}
+{'loss': 0.4842, 'grad_norm': 11.866058349609375, 'learning_rate': 4.9502262801132684e-05, 'epoch': 1.03}
+{'eval_loss': 0.317295640707016, 'eval_cer': 0.12600485311860318, 'eval_runtime': 106.0608, 'eval_samples_per_second': 48.368, 'eval_steps_per_second': 6.053, 'epoch': 1.05}
+  7%|██████████▋                                                                                                                                              | 13000/186450 [4:31:06<51:11:03,  1.06s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5035, 'grad_norm': 12.349020004272461, 'learning_rate': 4.946806521220054e-05, 'epoch': 1.06}
+{'loss': 0.5467, 'grad_norm': 38.37049865722656, 'learning_rate': 4.9432744146696896e-05, 'epoch': 1.09}
+{'loss': 0.5128, 'grad_norm': 6.788232326507568, 'learning_rate': 4.9396301226425076e-05, 'epoch': 1.13}
+{'eval_loss': 0.3251104950904846, 'eval_cer': 0.128336519039679, 'eval_runtime': 106.0177, 'eval_samples_per_second': 48.388, 'eval_steps_per_second': 6.056, 'epoch': 1.13}
+  8%|███████████▍                                                                                                                                             | 14000/186450 [4:52:11<53:47:06,  1.12s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5245, 'grad_norm': 215.22679138183594, 'learning_rate': 4.9358738124699536e-05, 'epoch': 1.16}
+{'loss': 0.5134, 'grad_norm': 3.31172776222229, 'learning_rate': 4.932005656626901e-05, 'epoch': 1.19}
+{'eval_loss': 0.30184000730514526, 'eval_cer': 0.12054848373934143, 'eval_runtime': 106.2199, 'eval_samples_per_second': 48.296, 'eval_steps_per_second': 6.044, 'epoch': 1.21}
+  8%|████████████▎                                                                                                                                            | 15000/186450 [5:13:02<53:12:48,  1.12s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4854, 'grad_norm': 10.12593936920166, 'learning_rate': 4.928025832723735e-05, 'epoch': 1.22}
+{'loss': 0.498, 'grad_norm': 185.24383544921875, 'learning_rate': 4.923934523498195e-05, 'epoch': 1.26}
+{'loss': 0.5173, 'grad_norm': 14.221302032470703, 'learning_rate': 4.919731916806983e-05, 'epoch': 1.29}
+{'eval_loss': 0.32068246603012085, 'eval_cer': 0.12519148128566973, 'eval_runtime': 106.3837, 'eval_samples_per_second': 48.222, 'eval_steps_per_second': 6.035, 'epoch': 1.29}
+  9%|█████████████▏                                                                                                                                           | 16000/186450 [5:33:55<55:57:58,  1.18s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4894, 'grad_norm': 3.915109157562256, 'learning_rate': 4.915418205617142e-05, 'epoch': 1.32}
+{'loss': 0.4875, 'grad_norm': 25.768115997314453, 'learning_rate': 4.9109935879971895e-05, 'epoch': 1.35}
+{'eval_loss': 0.3281855285167694, 'eval_cer': 0.13786652568221563, 'eval_runtime': 106.0915, 'eval_samples_per_second': 48.354, 'eval_steps_per_second': 6.051, 'epoch': 1.37}
+  9%|█████████████▉                                                                                                                                           | 17000/186450 [5:54:44<54:36:24,  1.16s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4798, 'grad_norm': 22.785228729248047, 'learning_rate': 4.906458267108031e-05, 'epoch': 1.38}
+{'loss': 0.5063, 'grad_norm': 8.569926261901855, 'learning_rate': 4.901812451193625e-05, 'epoch': 1.42}
+{'loss': 0.5024, 'grad_norm': 33.37775802612305, 'learning_rate': 4.897056353571423e-05, 'epoch': 1.45}
+{'eval_loss': 0.33335790038108826, 'eval_cer': 0.2174888500277902, 'eval_runtime': 106.3204, 'eval_samples_per_second': 48.25, 'eval_steps_per_second': 6.038, 'epoch': 1.45}
+ 10%|██████████████▊                                                                                                                                          | 18000/186450 [6:15:39<52:06:03,  1.11s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5136, 'grad_norm': 9.823685646057129, 'learning_rate': 4.8921901926225763e-05, 'epoch': 1.48}
+{'loss': 0.5122, 'grad_norm': 19.462369918823242, 'learning_rate': 4.887214191781908e-05, 'epoch': 1.51}
+{'eval_loss': 0.3361817002296448, 'eval_cer': 0.1320034703864872, 'eval_runtime': 105.9919, 'eval_samples_per_second': 48.4, 'eval_steps_per_second': 6.057, 'epoch': 1.53}
+ 10%|███████████████▌                                                                                                                                         | 19000/186450 [6:36:28<55:22:36,  1.19s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5145, 'grad_norm': 5.843488693237305, 'learning_rate': 4.882128579527654e-05, 'epoch': 1.54}
+{'loss': 0.504, 'grad_norm': 57.85633850097656, 'learning_rate': 4.876933589370972e-05, 'epoch': 1.58}
+{'loss': 0.4759, 'grad_norm': 3.0797176361083984, 'learning_rate': 4.871629459845217e-05, 'epoch': 1.61}
+{'eval_loss': 0.322956919670105, 'eval_cer': 0.13124432334241598, 'eval_runtime': 105.9608, 'eval_samples_per_second': 48.414, 'eval_steps_per_second': 6.059, 'epoch': 1.61}
+ 11%|████████████████▍                                                                                                                                        | 20000/186450 [6:57:08<51:36:21,  1.12s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4707, 'grad_norm': 64.72431945800781, 'learning_rate': 4.8662164344949944e-05, 'epoch': 1.64}
+{'loss': 0.4818, 'grad_norm': 39.3216438293457, 'learning_rate': 4.860694761864972e-05, 'epoch': 1.67}
+{'eval_loss': 0.31304046511650085, 'eval_cer': 0.12784171784131115, 'eval_runtime': 106.0147, 'eval_samples_per_second': 48.39, 'eval_steps_per_second': 6.056, 'epoch': 1.69}
+ 11%|█████████████████▏                                                                                                                                       | 21000/186450 [7:18:02<50:17:33,  1.09s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4677, 'grad_norm': 132.53176879882812, 'learning_rate': 4.8550646954884726e-05, 'epoch': 1.71}
+{'loss': 0.4651, 'grad_norm': 14.901037216186523, 'learning_rate': 4.8493264938758274e-05, 'epoch': 1.74}
+{'loss': 0.499, 'grad_norm': 4.322381973266602, 'learning_rate': 4.8434804205025094e-05, 'epoch': 1.77}
+{'eval_loss': 0.34007778763771057, 'eval_cer': 0.13176623693521494, 'eval_runtime': 106.0281, 'eval_samples_per_second': 48.383, 'eval_steps_per_second': 6.055, 'epoch': 1.77}
+ 12%|██████████████████                                                                                                                                       | 22000/186450 [7:38:52<50:19:00,  1.10s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4987, 'grad_norm': 6.66748571395874, 'learning_rate': 4.837526743797037e-05, 'epoch': 1.8}
+{'loss': 0.4852, 'grad_norm': 11.786062240600586, 'learning_rate': 4.8314657371286466e-05, 'epoch': 1.83}
+{'eval_loss': 0.3120326101779938, 'eval_cer': 0.12885165453387015, 'eval_runtime': 106.1786, 'eval_samples_per_second': 48.315, 'eval_steps_per_second': 6.046, 'epoch': 1.85}
+ 12%|██████████████████▊                                                                                                                                      | 23000/186450 [7:59:48<48:23:00,  1.07s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4679, 'grad_norm': 2.062699556350708, 'learning_rate': 4.82529767879474e-05, 'epoch': 1.87}
+{'loss': 0.4711, 'grad_norm': 12.727057456970215, 'learning_rate': 4.8190228520081084e-05, 'epoch': 1.9}
+{'loss': 0.4795, 'grad_norm': 50.611305236816406, 'learning_rate': 4.812641544883926e-05, 'epoch': 1.93}
+{'eval_loss': 0.32070356607437134, 'eval_cer': 0.1494028495126547, 'eval_runtime': 106.1545, 'eval_samples_per_second': 48.326, 'eval_steps_per_second': 6.048, 'epoch': 1.93}
+ 13%|███████████████████▋                                                                                                                                     | 24000/186450 [8:20:40<46:27:24,  1.03s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4635, 'grad_norm': 23.373098373413086, 'learning_rate': 4.806154050426522e-05, 'epoch': 1.96}
+{'loss': 0.4882, 'grad_norm': 7.216890811920166, 'learning_rate': 4.799560666515929e-05, 'epoch': 2.0}
+{'eval_loss': 0.30678310990333557, 'eval_cer': 0.12967858256401915, 'eval_runtime': 106.1747, 'eval_samples_per_second': 48.317, 'eval_steps_per_second': 6.047, 'epoch': 2.01}
+ 13%|████████████████████▌                                                                                                                                    | 25000/186450 [8:41:33<50:57:48,  1.14s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.4736, 'grad_norm': 10.894024848937988, 'learning_rate': 4.792861695894201e-05, 'epoch': 2.03}
+{'loss': 0.492, 'grad_norm': 8.159656524658203, 'learning_rate': 4.786057446151518e-05, 'epoch': 2.06}
+{'loss': 0.5206, 'grad_norm': 8.531061172485352, 'learning_rate': 4.779148229712057e-05, 'epoch': 2.09}
+{'eval_loss': 0.3529421091079712, 'eval_cer': 0.15700787615058223, 'eval_runtime': 106.2126, 'eval_samples_per_second': 48.299, 'eval_steps_per_second': 6.044, 'epoch': 2.09}
+ 14%|█████████████████████▎                                                                                                                                   | 26000/186450 [9:02:29<51:43:14,  1.16s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5131, 'grad_norm': 16.8464298248291, 'learning_rate': 4.7721343638196524e-05, 'epoch': 2.12}
+{'loss': 0.5176, 'grad_norm': 59.76241683959961, 'learning_rate': 4.7650161705232246e-05, 'epoch': 2.16}
+{'eval_loss': 0.3554942011833191, 'eval_cer': 0.1474778695080456, 'eval_runtime': 106.0912, 'eval_samples_per_second': 48.355, 'eval_steps_per_second': 6.051, 'epoch': 2.17}
+ 14%|██████████████████████▏                                                                                                                                  | 27000/186450 [9:23:14<49:11:37,  1.11s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5052, 'grad_norm': 8.422832489013672, 'learning_rate': 4.757793976661996e-05, 'epoch': 2.19}
+{'loss': 0.4976, 'grad_norm': 54.586944580078125, 'learning_rate': 4.750468113850482e-05, 'epoch': 2.22}
+{'loss': 0.5025, 'grad_norm': 4.096973896026611, 'learning_rate': 4.743038918463266e-05, 'epoch': 2.25}
+{'eval_loss': 0.31401658058166504, 'eval_cer': 0.13290495750132172, 'eval_runtime': 106.1412, 'eval_samples_per_second': 48.332, 'eval_steps_per_second': 6.049, 'epoch': 2.25}
+ 15%|██████████████████████▉                                                                                                                                  | 28000/186450 [9:44:12<50:17:10,  1.14s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.48, 'grad_norm': 6.575414657592773, 'learning_rate': 4.735506731619554e-05, 'epoch': 2.28}
+{'loss': 0.5133, 'grad_norm': 40.93332290649414, 'learning_rate': 4.72787189916751e-05, 'epoch': 2.32}
+{'eval_loss': 0.32952338457107544, 'eval_cer': 0.13596865807203765, 'eval_runtime': 106.0178, 'eval_samples_per_second': 48.388, 'eval_steps_per_second': 6.056, 'epoch': 2.33}
+ 16%|███████████████████████▋                                                                                                                                | 29000/186450 [10:05:01<45:42:46,  1.05s/it/workspace/venv/whisperx/lib/python3.12/site-packages/torch/utils/checkpoint.py:85: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+{'loss': 0.5037, 'grad_norm': 16.987974166870117, 'learning_rate': 4.7201347716683786e-05, 'epoch': 2.35}
+{'loss': 0.4957, 'grad_norm': 12.127232551574707, 'learning_rate': 4.712295704380387e-05, 'epoch': 2.38}
