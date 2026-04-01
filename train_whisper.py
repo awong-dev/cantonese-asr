@@ -434,11 +434,6 @@ def main():
         print(f"Train samples after filtering: {train_len}")
         print(f"Eval samples after filtering: {len(eval_dataset)}")
 
-        if args.max_eval_samples and args.max_eval_samples < len(eval_dataset):
-            eval_dataset = eval_dataset.shuffle(seed=args.seed).select(
-                range(args.max_eval_samples)
-            )
-            print(f"Subsampled eval to {args.max_eval_samples} samples (seed={args.seed})")
     else:
         # ---- Streaming mode: process on-the-fly, no disk cache ----
         print("Setting up streaming training dataset...")
@@ -464,11 +459,12 @@ def main():
         print(f"Train samples (approx): {train_len}")
         print(f"Eval samples: {len(eval_dataset)}")
 
-        if args.max_eval_samples and args.max_eval_samples < len(eval_dataset):
-            eval_dataset = eval_dataset.shuffle(seed=args.seed).select(
-                range(args.max_eval_samples)
-            )
-            print(f"Subsampled eval to {args.max_eval_samples} samples (seed={args.seed})")
+    # Subsample number of eval.
+    if args.max_eval_samples and args.max_eval_samples < len(eval_dataset):
+        eval_dataset = eval_dataset.shuffle(seed=args.seed).select(
+            range(args.max_eval_samples)
+        )
+        print(f"Subsampled eval to {args.max_eval_samples} samples (seed={args.seed})")
 
     # -----------------------------------------------------------------------
     # 7. Load model
