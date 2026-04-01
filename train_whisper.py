@@ -143,6 +143,12 @@ def parse_args():
         help="Subsample training set to this many samples (shuffled). Useful for disk/memory constraints.",
     )
     parser.add_argument(
+        "--max_eval_samples",
+        type=int,
+        default=None,
+        help="Subsample eval set to this many samples (shuffled). Speeds up evaluation significantly.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -427,6 +433,12 @@ def main():
         train_len = len(train_dataset)
         print(f"Train samples after filtering: {train_len}")
         print(f"Eval samples after filtering: {len(eval_dataset)}")
+
+        if args.max_eval_samples and args.max_eval_samples < len(eval_dataset):
+            eval_dataset = eval_dataset.shuffle(seed=args.seed).select(
+                range(args.max_eval_samples)
+            )
+            print(f"Subsampled eval to {args.max_eval_samples} samples (seed={args.seed})")
     else:
         # ---- Streaming mode: process on-the-fly, no disk cache ----
         print("Setting up streaming training dataset...")
@@ -451,6 +463,12 @@ def main():
 
         print(f"Train samples (approx): {train_len}")
         print(f"Eval samples: {len(eval_dataset)}")
+
+        if args.max_eval_samples and args.max_eval_samples < len(eval_dataset):
+            eval_dataset = eval_dataset.shuffle(seed=args.seed).select(
+                range(args.max_eval_samples)
+            )
+            print(f"Subsampled eval to {args.max_eval_samples} samples (seed={args.seed})")
 
     # -----------------------------------------------------------------------
     # 7. Load model
