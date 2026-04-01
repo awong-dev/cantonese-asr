@@ -575,8 +575,13 @@ def main():
     model.generation_config.forced_decoder_ids = None
 
     # Enable gradient checkpointing to save VRAM
+    # use_reentrant=False is required for compatibility with unfrozen encoder +
+    # gradient checkpointing in newer PyTorch (avoids "backward through graph a
+    # second time" error).
     model.config.use_cache = False
-    model.gradient_checkpointing_enable()
+    model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={"use_reentrant": False}
+    )
 
     # Freeze or unfreeze the encoder
     if args.freeze_encoder:
