@@ -31,6 +31,7 @@ from transformers import (
     WhisperProcessor,
     WhisperTokenizer,
 )
+from transformers.optimization import get_scheduler
 
 # Suppress gradient checkpoint warning for frozen layers
 warnings.filterwarnings(
@@ -53,6 +54,16 @@ def parse_args():
     )
 
     # Regularization
+    parser.add_argument(
+        "--freeze_encoder", action="store_true",
+        help="Freeze the encoder (only train decoder). Default: train full model.",
+    )
+    parser.add_argument(
+        "--encoder_lr", type=float, default=None,
+        help="Separate learning rate for encoder (default: same as --lr). "
+             "Use a lower value like 1e-6 when unfreezing encoder to avoid "
+             "destabilising pretrained representations.",
+    )
     parser.add_argument(
         "--attention_dropout", type=float, default=0.0,
         help="Attention dropout rate",
@@ -215,6 +226,60 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
 
 # ---------------------------------------------------------------------------
+# 2b. Custom Trainer with differential learning rates
+# ---------------------------------------------------------------------------
+class DifferentialLRTrainer(Seq2SeqTrainer):
+    """
+    Seq2SeqTrainer subclass that supports separate learning rates for
+    encoder and decoder. When encoder_lr is set, creates parameter groups
+    with different LRs; otherwise falls back to default behaviour.
+    """
+
+    def __init__(self, *args, encoder_lr=None, **kwargs):
+        self.encoder_lr = encoder_lr
+        super().__init__(*args, **kwargs)
+
+    def create_optimizer(self):
+        if self.optimizer is not None:
+            return self.optimizer
+
+        if self.encoder_lr is None:
+            # No differential LR — use default optimizer
+            return super().create_optimizer()
+
+        # Build parameter groups: encoder vs everything else (decoder + embed)
+        encoder_params = []
+        decoder_params = []
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name.startswith("model.encoder."):
+                encoder_params.append(param)
+            else:
+                decoder_params.append(param)
+
+        optimizer_kwargs = {
+            "betas": (self.args.adam_beta1, self.args.adam_beta2),
+            "eps": self.args.adam_epsilon,
+            "weight_decay": self.args.weight_decay,
+        }
+
+        self.optimizer = torch.optim.AdamW(
+            [
+                {"params": encoder_params, "lr": self.encoder_lr},
+                {"params": decoder_params, "lr": self.args.learning_rate},
+            ],
+            **optimizer_kwargs,
+        )
+
+        print(f"  Optimizer param groups:")
+        print(f"    Encoder: {len(encoder_params)} tensors, lr={self.encoder_lr}")
+        print(f"    Decoder: {len(decoder_params)} tensors, lr={self.args.learning_rate}")
+
+        return self.optimizer
+
+
+# ---------------------------------------------------------------------------
 # 3. Main
 # ---------------------------------------------------------------------------
 def main():
@@ -319,6 +384,33 @@ def main():
     # Normalize text column name to "sentence"
     if text_col != "sentence":
         common_voice = common_voice.rename_column(text_col, "sentence")
+
+    # ---- Remove any test samples that leaked into the training set ----
+    # Use the "path" column (or audio["path"]) as unique identifier.
+    if "path" in common_voice["test"].column_names:
+        test_paths = set(common_voice["test"]["path"])
+        train_before = len(common_voice["train"])
+        common_voice["train"] = common_voice["train"].filter(
+            lambda x: x["path"] not in test_paths
+        )
+        n_removed = train_before - len(common_voice["train"])
+        if n_removed:
+            print(f"Removed {n_removed} test-overlapping samples from training set")
+    elif "audio" in common_voice["test"].column_names:
+        # HF datasets store path inside the audio dict
+        test_paths = set(
+            ex["path"] for ex in common_voice["test"]["audio"] if ex.get("path")
+        )
+        if test_paths:
+            train_before = len(common_voice["train"])
+            common_voice["train"] = common_voice["train"].filter(
+                lambda x: x["audio"]["path"] not in test_paths
+            )
+            n_removed = train_before - len(common_voice["train"])
+            if n_removed:
+                print(f"Removed {n_removed} test-overlapping samples from training set")
+    else:
+        print("Warning: no 'path' or 'audio' column found — skipping deduplication")
 
     print(f"Train samples: {len(common_voice['train'])}")
     print(f"Test samples: {len(common_voice['test'])}")
@@ -425,15 +517,9 @@ def main():
             batched=True,
             batch_size=16,
         )
-        eval_dataset = eval_dataset.filter(
-            lambda x: x["input_length"] < max_input_length_samples
-        )
-        eval_dataset = eval_dataset.remove_columns(["input_length"])
 
         train_len = len(train_dataset)
         print(f"Train samples after filtering: {train_len}")
-        print(f"Eval samples after filtering: {len(eval_dataset)}")
-
     else:
         # ---- Streaming mode: process on-the-fly, no disk cache ----
         print("Setting up streaming training dataset...")
@@ -450,16 +536,16 @@ def main():
             remove_columns=remove_cols_test,
             keep_in_memory=True,
         )
-        eval_dataset = eval_dataset.filter(
-            lambda x: x["input_length"] < max_input_length_samples,
-            keep_in_memory=True,
-        )
-        eval_dataset = eval_dataset.remove_columns(["input_length"])
 
         print(f"Train samples (approx): {train_len}")
-        print(f"Eval samples: {len(eval_dataset)}")
 
-    # Subsample number of eval.
+    # ---- Common eval post-processing ----
+    eval_dataset = eval_dataset.filter(
+        lambda x: x["input_length"] < max_input_length_samples
+    )
+    eval_dataset = eval_dataset.remove_columns(["input_length"])
+    print(f"Eval samples after filtering: {len(eval_dataset)}")
+
     if args.max_eval_samples and args.max_eval_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle(seed=args.seed).select(
             range(args.max_eval_samples)
@@ -492,10 +578,17 @@ def main():
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
 
-    # Freeze the encoder — Whisper's encoder is already very good;
-    # fine-tuning only the decoder is faster and often sufficient.
-    # Comment this out if you want to fine-tune the full model.
-    model.freeze_encoder()
+    # Freeze or unfreeze the encoder
+    if args.freeze_encoder:
+        model.freeze_encoder()
+        print("Encoder is FROZEN — training decoder only.")
+    else:
+        # Ensure encoder params are trainable (undo any prior freeze)
+        for param in model.model.encoder.parameters():
+            param.requires_grad = True
+        print("Encoder is UNFROZEN — training full model.")
+        if args.encoder_lr and args.encoder_lr != args.lr:
+            print(f"  Encoder LR: {args.encoder_lr}, Decoder LR: {args.lr}")
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -601,7 +694,9 @@ def main():
     # -----------------------------------------------------------------------
     # 11. Trainer
     # -----------------------------------------------------------------------
-    trainer = Seq2SeqTrainer(
+    # Use differential LR trainer when encoder is unfrozen with a separate LR
+    encoder_lr = args.encoder_lr if (not args.freeze_encoder and args.encoder_lr) else None
+    trainer = DifferentialLRTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -609,6 +704,7 @@ def main():
         data_collator=data_collator,
         compute_metrics=compute_metrics,
         processing_class=processor.feature_extractor,
+        encoder_lr=encoder_lr,
         callbacks=[
             EarlyStoppingCallback(
                 early_stopping_patience=args.early_stopping_patience

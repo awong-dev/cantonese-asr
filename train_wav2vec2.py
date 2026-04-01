@@ -335,6 +335,33 @@ def main():
     if text_col != "sentence":
         common_voice = common_voice.rename_column(text_col, "sentence")
 
+    # ---- Remove any test samples that leaked into the training set ----
+    # Use the "path" column (or audio["path"]) as unique identifier.
+    if "path" in common_voice["test"].column_names:
+        test_paths = set(common_voice["test"]["path"])
+        train_before = len(common_voice["train"])
+        common_voice["train"] = common_voice["train"].filter(
+            lambda x: x["path"] not in test_paths
+        )
+        n_removed = train_before - len(common_voice["train"])
+        if n_removed:
+            print(f"Removed {n_removed} test-overlapping samples from training set")
+    elif "audio" in common_voice["test"].column_names:
+        # HF datasets store path inside the audio dict
+        test_paths = set(
+            ex["path"] for ex in common_voice["test"]["audio"] if ex.get("path")
+        )
+        if test_paths:
+            train_before = len(common_voice["train"])
+            common_voice["train"] = common_voice["train"].filter(
+                lambda x: x["audio"]["path"] not in test_paths
+            )
+            n_removed = train_before - len(common_voice["train"])
+            if n_removed:
+                print(f"Removed {n_removed} test-overlapping samples from training set")
+    else:
+        print("Warning: no 'path' or 'audio' column found — skipping deduplication")
+
     print(f"Train samples: {len(common_voice['train'])}")
     print(f"Test samples: {len(common_voice['test'])}")
 
