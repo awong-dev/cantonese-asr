@@ -384,60 +384,73 @@ def main():
 
     common_voice = common_voice.map(apply_text_cleaning)
 
-    # Build character vocabulary from train + test
-    print("Building vocabulary...")
-
-    def extract_chars(batch):
-        all_text = " ".join(batch["sentence"])
-        return {"vocab": [list(set(all_text))]}
-
-    vocab_train = common_voice["train"].map(
-        extract_chars, batched=True, batch_size=1000,
-        remove_columns=common_voice["train"].column_names,
-    )
-    vocab_test = common_voice["test"].map(
-        extract_chars, batched=True, batch_size=1000,
-        remove_columns=common_voice["test"].column_names,
-    )
-
-    all_chars = set()
-    for row in vocab_train:
-        all_chars.update(row["vocab"])
-    for row in vocab_test:
-        all_chars.update(row["vocab"])
-
-    # Remove ASCII characters (map to [UNK]), keep space for word delimiter
-    vocab_list = sorted([c for c in all_chars if not c.isascii()])
-    vocab_list.append(" ")
-
-    vocab_dict = {char: idx for idx, char in enumerate(vocab_list)}
-    # Use pipe as word delimiter (CTC convention)
-    vocab_dict["|"] = vocab_dict.pop(" ")
-    vocab_dict["[UNK]"] = len(vocab_dict)
-    vocab_dict["[PAD]"] = len(vocab_dict)
-
-    vocab_path = os.path.join(args.output_dir, "vocab.json")
-    os.makedirs(args.output_dir, exist_ok=True)
-    with open(vocab_path, "w", encoding="utf-8") as f:
-        json.dump(vocab_dict, f, ensure_ascii=False)
-
-    print(f"Vocabulary size: {len(vocab_dict)} chars (saved to {vocab_path})")
-
     # -----------------------------------------------------------------------
-    # 8. Create processor
+    # 7b. Vocabulary + processor
     # -----------------------------------------------------------------------
-    tokenizer = Wav2Vec2CTCTokenizer(
-        vocab_path, unk_token="[UNK]", pad_token="[PAD]",
-        word_delimiter_token="|",
-    )
-    feature_extractor = Wav2Vec2FeatureExtractor(
-        feature_size=1, sampling_rate=16000, padding_value=0.0,
-        do_normalize=True, return_attention_mask=True,
-    )
-    processor = Wav2Vec2Processor(
-        feature_extractor=feature_extractor, tokenizer=tokenizer,
-    )
-    processor.save_pretrained(args.output_dir)
+    # If the model path already contains a saved processor (fine-tuned
+    # checkpoint), reuse it so the vocab/token mapping stays consistent.
+    # Otherwise build vocabulary from scratch.
+    _model_processor_path = Path(args.model)
+    if (_model_processor_path / "preprocessor_config.json").exists() and (
+        _model_processor_path / "vocab.json"
+    ).exists():
+        print(f"Loading existing processor from {args.model}")
+        processor = Wav2Vec2Processor.from_pretrained(args.model)
+        os.makedirs(args.output_dir, exist_ok=True)
+        processor.save_pretrained(args.output_dir)
+        print(f"Vocabulary size: {len(processor.tokenizer)} (reused from checkpoint)")
+    else:
+        # Build character vocabulary from train + test
+        print("Building vocabulary...")
+
+        def extract_chars(batch):
+            all_text = " ".join(batch["sentence"])
+            return {"vocab": [list(set(all_text))]}
+
+        vocab_train = common_voice["train"].map(
+            extract_chars, batched=True, batch_size=1000,
+            remove_columns=common_voice["train"].column_names,
+        )
+        vocab_test = common_voice["test"].map(
+            extract_chars, batched=True, batch_size=1000,
+            remove_columns=common_voice["test"].column_names,
+        )
+
+        all_chars = set()
+        for row in vocab_train:
+            all_chars.update(row["vocab"])
+        for row in vocab_test:
+            all_chars.update(row["vocab"])
+
+        # Remove ASCII characters (map to [UNK]), keep space for word delimiter
+        vocab_list = sorted([c for c in all_chars if not c.isascii()])
+        vocab_list.append(" ")
+
+        vocab_dict = {char: idx for idx, char in enumerate(vocab_list)}
+        # Use pipe as word delimiter (CTC convention)
+        vocab_dict["|"] = vocab_dict.pop(" ")
+        vocab_dict["[UNK]"] = len(vocab_dict)
+        vocab_dict["[PAD]"] = len(vocab_dict)
+
+        vocab_path = os.path.join(args.output_dir, "vocab.json")
+        os.makedirs(args.output_dir, exist_ok=True)
+        with open(vocab_path, "w", encoding="utf-8") as f:
+            json.dump(vocab_dict, f, ensure_ascii=False)
+
+        print(f"Vocabulary size: {len(vocab_dict)} chars (saved to {vocab_path})")
+
+        tokenizer = Wav2Vec2CTCTokenizer(
+            vocab_path, unk_token="[UNK]", pad_token="[PAD]",
+            word_delimiter_token="|",
+        )
+        feature_extractor = Wav2Vec2FeatureExtractor(
+            feature_size=1, sampling_rate=16000, padding_value=0.0,
+            do_normalize=True, return_attention_mask=True,
+        )
+        processor = Wav2Vec2Processor(
+            feature_extractor=feature_extractor, tokenizer=tokenizer,
+        )
+        processor.save_pretrained(args.output_dir)
 
     # -----------------------------------------------------------------------
     # 9. Audio loading + feature extraction
