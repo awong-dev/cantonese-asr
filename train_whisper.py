@@ -281,11 +281,31 @@ class DifferentialLRTrainer(Seq2SeqTrainer):
     Seq2SeqTrainer subclass that supports separate learning rates for
     encoder and decoder. When encoder_lr is set, creates parameter groups
     with different LRs; otherwise falls back to default behaviour.
+    Also strips unexpected keyword arguments (e.g. input_ids) that peft
+    may inject but WhisperForConditionalGeneration does not accept.
     """
+
+    # Keys that Whisper's forward() actually accepts
+    _WHISPER_FORWARD_KEYS = {
+        "input_features", "attention_mask", "decoder_input_ids",
+        "decoder_attention_mask", "head_mask", "decoder_head_mask",
+        "cross_attn_head_mask", "encoder_outputs", "past_key_values",
+        "decoder_inputs_embeds", "labels", "use_cache",
+        "output_attentions", "output_hidden_states", "return_dict",
+        "cache_position",
+    }
 
     def __init__(self, *args, encoder_lr=None, **kwargs):
         self.encoder_lr = encoder_lr
         super().__init__(*args, **kwargs)
+
+    def compute_loss(self, model, inputs, *args, **kwargs):
+        # Strip keys that Whisper doesn't accept (e.g. input_ids from peft)
+        inputs = {
+            k: v for k, v in inputs.items()
+            if k in self._WHISPER_FORWARD_KEYS
+        }
+        return super().compute_loss(model, inputs, *args, **kwargs)
 
     def create_optimizer(self):
         if self.optimizer is not None:
