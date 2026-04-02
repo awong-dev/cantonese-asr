@@ -587,11 +587,8 @@ def main():
         print(f"Train samples (approx): {train_len}")
 
     # ---- Common eval post-processing ----
-    eval_dataset = eval_dataset.filter(
-        lambda x: x["input_length"] < max_input_length_samples
-    )
     eval_dataset = eval_dataset.remove_columns(["input_length"])
-    print(f"Eval samples after filtering: {len(eval_dataset)}")
+    print(f"Eval samples: {len(eval_dataset)}")
 
     if args.max_eval_samples and args.max_eval_samples < len(eval_dataset):
         eval_dataset = eval_dataset.shuffle(seed=args.seed).select(
@@ -792,6 +789,8 @@ def main():
         remove_unused_columns=False,
         # Gradient
         max_grad_norm=1.0,
+        # Labels — explicitly set so Trainer doesn't infer input_ids for peft models
+        label_names=["labels"],
     )
 
     # -----------------------------------------------------------------------
