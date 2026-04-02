@@ -1,0 +1,101 @@
+args: Namespace(model='openai/whisper-large-v3', freeze_encoder=True, unfreeze_encoder_layers=None, freeze_decoder_layers=None, encoder_lr=None, lora=False, lora_r=16, lora_alpha=32, lora_dropout=0.05, lora_target_modules=None, lora_merge_on_save=False, attention_dropout=0.1, dropout=0.1, activation_dropout=0.0, encoder_layerdrop=0.0, decoder_layerdrop=0.0, dataset='mozilla-foundation/common_voice_17_0', dataset_path='cv-corpus-25.0-2026-03-09/yue', train_tsv='validated.tsv', language='yue', language_full='cantonese', lr=1e-06, warmup=1000, epochs=10, train_batch_size=4, eval_batch_size=31, grad_accum=4, output_dir='./whisper-large-v3-turbo-yue', max_input_length=30.0, resume_from_checkpoint=False, eval_steps=500, save_steps=500, early_stopping_patience=0, max_train_samples=None, max_eval_samples=500, seed=42, no_streaming=False, no_streaming_train=False, no_streaming_eval=True, cache_dir=None)
+CUDA available: True
+GPU: NVIDIA GeForce RTX 3090
+VRAM: 25.3 GB
+Loading dataset from local path: cv-corpus-25.0-2026-03-09/yue
+Removed 5130 test-overlapping samples from training set
+Train samples: 186322
+Test samples: 5130
+Setting up streaming training dataset...
+Train samples (approx): 186322
+Preprocessing eval dataset (disk cache, batched)...
+Eval samples: 5130
+Subsampled eval to 500 samples (seed=42)
+Loading model: openai/whisper-large-v3
+Encoder is FROZEN — training decoder only.
+Total params: 1543.5M
+Trainable params: 906.5M
+Steps per epoch: 11645
+Max steps: 116450
+Starting training...
+  0%|                                                                                                                                                                                                           | 0/116450 [00:00<?, ?it/s]
+/workspace/venv/whisperx/lib/python3.12/site-packages/torchaudio/_backend/utils.py:213: UserWarning: In 2.9, this function's implementation will be changed to use torchaudio.load_with_torchcodec` under the hood. Some parameters like ``normalize``, ``format``, ``buffer_size``, and ``backend`` will be ignored. We recommend that you port your code to rely directly on TorchCodec's decoder instead: https://docs.pytorch.org/torchcodec/stable/generated/torchcodec.decoders.AudioDecoder.html#torchcodec.decoders.AudioDecoder.
+  warnings.warn(
+/workspace/venv/whisperx/lib/python3.12/site-packages/torchaudio/_backend/ffmpeg.py:88: UserWarning: torio.io._streaming_media_decoder.StreamingMediaDecoder has been deprecated. This deprecation is part of a large refactoring effort to transition TorchAudio into a maintenance phase. The decoding and encoding capabilities of PyTorch for both audio and video are being consolidated into TorchCodec. Please see https://github.com/pytorch/audio/issues/3902 for more information. It will be removed from the 2.9 release.
+  s = torchaudio.io.StreamReader(src, format, None, buffer_size)
+/workspace/venv/whisperx/lib/python3.12/site-packages/torchaudio/_backend/utils.py:213: UserWarning: In 2.9, this function's implementation will be changed to use torchaudio.load_with_torchcodec` under the hood. Some parameters like ``normalize``, ``format``, ``buffer_size``, and ``backend`` will be ignored. We recommend that you port your code to rely directly on TorchCodec's decoder instead: https://docs.pytorch.org/torchcodec/stable/generated/torchcodec.decoders.AudioDecoder.html#torchcodec.decoders.AudioDecoder.
+  warnings.warn(
+/workspace/venv/whisperx/lib/python3.12/site-packages/torchaudio/_backend/utils.py:213: UserWarning: In 2.9, this function's implementation will be changed to use torchaudio.load_with_torchcodec` under the hood. Some parameters like ``normalize``, ``format``, ``buffer_size``, and ``backend`` will be ignored. We recommend that you port your code to rely directly on TorchCodec's decoder instead: https://docs.pytorch.org/torchcodec/stable/generated/torchcodec.decoders.AudioDecoder.html#torchcodec.decoders.AudioDecoder.
+  warnings.warn(
+/workspace/venv/whisperx/lib/python3.12/site-packages/torchaudio/_backend/ffmpeg.py:88: UserWarning: torio.io._streaming_media_decoder.StreamingMediaDecoder has been deprecated. This deprecation is part of a large refactoring effort to transition TorchAudio into a maintenance phase. The decoding and encoding capabilities of PyTorch for both audio and video are being consolidated into TorchCodec. Please see https://github.com/pytorch/audio/issues/3902 for more information. It will be removed from the 2.9 release.
+  s = torchaudio.io.StreamReader(src, format, None, buffer_size)
+/workspace/venv/whisperx/lib/python3.12/site-packages/torchaudio/_backend/ffmpeg.py:88: UserWarning: torio.io._streaming_media_decoder.StreamingMediaDecoder has been deprecated. This deprecation is part of a large refactoring effort to transition TorchAudio into a maintenance phase. The decoding and encoding capabilities of PyTorch for both audio and video are being consolidated into TorchCodec. Please see https://github.com/pytorch/audio/issues/3902 for more information. It will be removed from the 2.9 release.
+  s = torchaudio.io.StreamReader(src, format, None, buffer_size)
+/workspace/venv/whisperx/lib/python3.12/site-packages/torchaudio/_backend/utils.py:213: UserWarning: In 2.9, this function's implementation will be changed to use torchaudio.load_with_torchcodec` under the hood. Some parameters like ``normalize``, ``format``, ``buffer_size``, and ``backend`` will be ignored. We recommend that you port your code to rely directly on TorchCodec's decoder instead: https://docs.pytorch.org/torchcodec/stable/generated/torchcodec.decoders.AudioDecoder.html#torchcodec.decoders.AudioDecoder.
+  warnings.warn(
+/workspace/venv/whisperx/lib/python3.12/site-packages/torchaudio/_backend/ffmpeg.py:88: UserWarning: torio.io._streaming_media_decoder.StreamingMediaDecoder has been deprecated. This deprecation is part of a large refactoring effort to transition TorchAudio into a maintenance phase. The decoding and encoding capabilities of PyTorch for both audio and video are being consolidated into TorchCodec. Please see https://github.com/pytorch/audio/issues/3902 for more information. It will be removed from the 2.9 release.
+  s = torchaudio.io.StreamReader(src, format, None, buffer_size)
+{'loss': 6.4234, 'grad_norm': 33.270179748535156, 'learning_rate': 9.9e-08, 'epoch': 0.0}
+{'loss': 5.8313, 'grad_norm': 19.731773376464844, 'learning_rate': 1.99e-07, 'epoch': 0.0}
+{'loss': 5.0821, 'grad_norm': 18.2131404876709, 'learning_rate': 2.9899999999999996e-07, 'epoch': 0.0}
+{'loss': 4.4793, 'grad_norm': 16.336156845092773, 'learning_rate': 3.99e-07, 'epoch': 0.0}
+{'loss': 4.1464, 'grad_norm': 12.063316345214844, 'learning_rate': 4.99e-07, 'epoch': 0.0}
+  0%|▊                                                                                                                                                                                             | 500/116450 [13:58<53:03:38,  1.65s/it  REF: 我而家去咗石龍███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 17/17 [03:37<00:00, 10.79s/it]
+  HYP:  我而家去咗錫龍
+
+  REF: 全國人大委員長
+  HYP: 全國任大委員長
+
+  REF: 噉貴港朋友幾有研究
+  HYP: 咁貴港朋友幾有研究
+
+{'eval_loss': 0.6731540560722351, 'eval_cer': 0.1635904410336118, 'eval_runtime': 436.5207, 'eval_samples_per_second': 1.145, 'eval_steps_per_second': 0.039, 'epoch': 0.0}
+  0%|▊                                                                                                                                                                                             | 500/116450 [21:14<53:03:38,  1.65s/it/workspace/venv/whisperx/lib/python3.12/site-packages/transformers/modeling_utils.py:3918: UserWarning: Moving the following attributes in the config to the generation config: {'max_length': 448, 'begin_suppress_tokens': [220, 50257]}. You are seeing this warning because you've set generation parameters in the model config, as opposed to in the generation config.
+  warnings.warn(
+{'loss': 3.8046, 'grad_norm': 13.804327964782715, 'learning_rate': 5.989999999999999e-07, 'epoch': 0.01}
+{'loss': 3.5111, 'grad_norm': 14.509801864624023, 'learning_rate': 6.989999999999999e-07, 'epoch': 0.01}
+{'loss': 3.3945, 'grad_norm': 11.994491577148438, 'learning_rate': 7.99e-07, 'epoch': 0.01}
+{'loss': 3.2109, 'grad_norm': 11.114068031311035, 'learning_rate': 8.99e-07, 'epoch': 0.01}
+{'loss': 3.0738, 'grad_norm': 12.532280921936035, 'learning_rate': 9.989999999999999e-07, 'epoch': 0.01}
+  1%|█▌                                                                                                                                                                                           | 1000/116450 [35:26<53:11:45,  1.66s/it  REF: 我而家去咗石龍███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 17/17 [03:38<00:00, 10.79s/it]
+  HYP: 我而家去咗錫龍
+
+  REF: 全國人大委員長
+  HYP: 全國任大委員長
+
+  REF: 噉貴港朋友幾有研究
+  HYP: 咁貴港朋友幾有研究
+
+{'eval_loss': 0.38331377506256104, 'eval_cer': 0.14785311832135226, 'eval_runtime': 440.2769, 'eval_samples_per_second': 1.136, 'eval_steps_per_second': 0.039, 'epoch': 0.01}
+{'loss': 2.9688, 'grad_norm': 11.885834693908691, 'learning_rate': 9.999981856460852e-07, 'epoch': 0.01}
+ REF: 我而家去咗石龍███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 17/17 [03:44<00:00, 11.14s/it]
+  HYP: 我而家去咗石龍
+
+  REF: 全國人大委員長
+  HYP: 全國任大委員長
+
+  REF: 噉貴港朋友幾有研究
+  HYP: 噉貴港朋友幾有研究
+
+{'eval_loss': 0.2405226081609726, 'eval_cer': 0.11676704876627161, 'eval_runtime': 443.8766, 'eval_samples_per_second': 1.126, 'eval_steps_per_second': 0.038, 'epoch': 0.06}
+{'loss': 2.0998, 'grad_norm': 11.299585342407227, 'learning_rate': 9.919602818914988e-07, 'epoch': 0.07}
+{'loss': 2.043, 'grad_norm': 11.22896957397461, 'learning_rate': 9.917154511328203e-07, 'epoch': 0.07}
+{'loss': 1.9918, 'grad_norm': 9.780272483825684, 'learning_rate': 9.914669793340735e-07, 'epoch': 0.07}
+{'loss': 1.8965, 'grad_norm': 12.338865280151367, 'learning_rate': 9.912148683351352e-07, 'epoch': 0.07}
+{'loss': 1.9802, 'grad_norm': 12.319168090820312, 'learning_rate': 9.909591200028296e-07, 'epoch': 0.07}
+  7%|████████████▊                                                                                                                                                                              | 8000/116450 [5:39:02<51:48:49,  1.72s/it  REF: 我而家去咗石龍███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 17/17 [03:45<00:00, 11.20s/it]
+  HYP: 我而家去咗石籠
+
+  REF: 全國人大委員長
+  HYP: 全國任大委員長
+
+  REF: 噉貴港朋友幾有研究
+  HYP: 噉貴港朋友幾有研究
+
+{'eval_loss': 0.23060254752635956, 'eval_cer': 0.111715562463571, 'eval_runtime': 448.9563, 'eval_samples_per_second': 1.114, 'eval_steps_per_second': 0.038, 'epoch': 0.07}
+{'loss': 1.915, 'grad_norm': 10.949762344360352, 'learning_rate': 9.906997362309139e-07, 'epoch': 0.07}
+{'loss': 1.9232, 'grad_norm': 11.932129859924316, 'learning_rate': 9.90436718940066e-07, 'epoch': 0.07}
+{'loss': 2.2578, 'grad_norm': 12.202622413635254, 'learning_rate': 9.901700700778683e-07, 'epoch': 0.07}
+{'loss': 2.3146, 'grad_norm': 12.148035049438477, 'learning_rate': 9.898997916187947e-07, 'epoch': 0.07}
+{'loss': 2.1388, 'grad_norm': 12.707388877868652, 'learning_rate': 9.896258855641945e-07, 'epoch': 0.07}
+  7%|█████████████▋
