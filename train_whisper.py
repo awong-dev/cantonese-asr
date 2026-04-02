@@ -217,8 +217,18 @@ def parse_args():
     # Caching
     parser.add_argument(
         "--no_streaming", action="store_true",
-        help="Disable streaming and preprocess all data upfront (uses disk cache). "
-             "Faster training but requires disk space for cached features.",
+        help="Disable streaming for both train and eval (preprocess upfront). "
+             "Shorthand for --no_streaming_train --no_streaming_eval.",
+    )
+    parser.add_argument(
+        "--no_streaming_train", action="store_true",
+        help="Disable streaming for training data only (disk cache, batched). "
+             "Faster training but requires disk space.",
+    )
+    parser.add_argument(
+        "--no_streaming_eval", action="store_true",
+        help="Disable streaming for eval data only (disk cache, batched). "
+             "Faster eval preprocessing.",
     )
     parser.add_argument(
         "--cache_dir", type=str, default=None,
@@ -563,8 +573,12 @@ def main():
     remove_cols_train = common_voice.column_names["train"]
     remove_cols_test = common_voice.column_names["test"]
 
-    if args.no_streaming:
-        # ---- Disk cache mode: preprocess everything upfront (batched) ----
+    # Resolve streaming flags (--no_streaming sets both)
+    no_streaming_train = args.no_streaming or args.no_streaming_train
+    no_streaming_eval = args.no_streaming or args.no_streaming_eval
+
+    # ---- Training data ----
+    if no_streaming_train:
         print("Preprocessing training dataset (disk cache, batched)...")
         train_dataset = common_voice["train"].map(
             prepare_dataset_batched,
@@ -576,19 +590,9 @@ def main():
             lambda x: x["input_length"] < max_input_length_samples
         )
         train_dataset = train_dataset.remove_columns(["input_length"])
-
-        print("Preprocessing eval dataset (disk cache, batched)...")
-        eval_dataset = common_voice["test"].map(
-            prepare_dataset_batched,
-            remove_columns=remove_cols_test,
-            batched=True,
-            batch_size=16,
-        )
-
         train_len = len(train_dataset)
         print(f"Train samples after filtering: {train_len}")
     else:
-        # ---- Streaming mode: process on-the-fly, no disk cache ----
         print("Setting up streaming training dataset...")
         train_dataset = (
             common_voice["train"]
@@ -596,15 +600,24 @@ def main():
             .map(prepare_dataset, remove_columns=remove_cols_train)
             .filter(lambda x: x["input_length"] < max_input_length_samples)
         )
+        print(f"Train samples (approx): {train_len}")
 
-        print("Preprocessing eval dataset...")
+    # ---- Eval data ----
+    if no_streaming_eval:
+        print("Preprocessing eval dataset (disk cache, batched)...")
+        eval_dataset = common_voice["test"].map(
+            prepare_dataset_batched,
+            remove_columns=remove_cols_test,
+            batched=True,
+            batch_size=16,
+        )
+    else:
+        print("Preprocessing eval dataset (streaming)...")
         eval_dataset = common_voice["test"].map(
             prepare_dataset,
             remove_columns=remove_cols_test,
             keep_in_memory=True,
         )
-
-        print(f"Train samples (approx): {train_len}")
 
     # ---- Common eval post-processing ----
     eval_dataset = eval_dataset.remove_columns(["input_length"])
@@ -763,7 +776,7 @@ def main():
     # -----------------------------------------------------------------------
     # 10. Training arguments
     # -----------------------------------------------------------------------
-    if args.no_streaming:
+    if no_streaming_train:
         epoch_or_steps_args = {"num_train_epochs": args.epochs}
     else:
         steps_per_epoch = train_len // (args.train_batch_size * args.grad_accum)
