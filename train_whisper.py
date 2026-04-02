@@ -59,10 +59,50 @@ def parse_args():
         help="Freeze the encoder (only train decoder). Default: train full model.",
     )
     parser.add_argument(
+        "--unfreeze_encoder_layers", type=int, default=None,
+        help="Freeze the encoder except for the last N layers. "
+             "E.g. --unfreeze_encoder_layers 4 unfreezes the last 4 encoder "
+             "layers while keeping the rest frozen. Overrides --freeze_encoder.",
+    )
+    parser.add_argument(
+        "--freeze_decoder_layers", type=int, default=None,
+        help="Freeze the first N decoder layers. "
+             "E.g. --freeze_decoder_layers 4 freezes the first 4 decoder "
+             "layers while keeping the rest trainable.",
+    )
+    parser.add_argument(
         "--encoder_lr", type=float, default=None,
         help="Separate learning rate for encoder (default: same as --lr). "
              "Use a lower value like 1e-6 when unfreezing encoder to avoid "
              "destabilising pretrained representations.",
+    )
+    # LoRA
+    parser.add_argument(
+        "--lora", action="store_true",
+        help="Apply LoRA (Low-Rank Adaptation) instead of full fine-tuning. "
+             "Requires peft: pip install peft",
+    )
+    parser.add_argument(
+        "--lora_r", type=int, default=16,
+        help="LoRA rank (default: 16). Higher = more capacity but more params.",
+    )
+    parser.add_argument(
+        "--lora_alpha", type=int, default=32,
+        help="LoRA alpha scaling factor (default: 32). Typically 2x lora_r.",
+    )
+    parser.add_argument(
+        "--lora_dropout", type=float, default=0.05,
+        help="LoRA dropout (default: 0.05).",
+    )
+    parser.add_argument(
+        "--lora_target_modules", type=str, nargs="+", default=None,
+        help="Which modules to apply LoRA to (default: all linear layers). "
+             "E.g. --lora_target_modules q_proj v_proj",
+    )
+    parser.add_argument(
+        "--lora_merge_on_save", action="store_true",
+        help="Merge LoRA weights into the base model when saving final model. "
+             "Produces a standalone model that doesn't require peft to load.",
     )
     parser.add_argument(
         "--attention_dropout", type=float, default=0.0,
@@ -144,8 +184,9 @@ def parse_args():
     parser.add_argument(
         "--early_stopping_patience",
         type=int,
-        default=5,
-        help="Early stopping patience (number of evals)",
+        default=0,
+        help="Early stopping patience (number of evals without improvement). "
+             "0 = disabled (default).",
     )
     parser.add_argument(
         "--max_train_samples",
@@ -421,10 +462,9 @@ def main():
     # model to unlearn its pretrained text distribution, causing divergence.
     # CER is computed on the raw tokenizer output, which is standard for Whisper.
 
-    # Shuffle and optionally subsample training set
-    common_voice["train"] = common_voice["train"].shuffle(seed=args.seed)
+    # Optionally subsample training set
     if args.max_train_samples and args.max_train_samples < len(common_voice["train"]):
-        common_voice["train"] = common_voice["train"].select(
+        common_voice["train"] = common_voice["train"].shuffle(seed=args.seed).select(
             range(args.max_train_samples)
         )
         print(f"Subsampled to {args.max_train_samples} train samples")
@@ -584,7 +624,22 @@ def main():
     )
 
     # Freeze or unfreeze the encoder
-    if args.freeze_encoder:
+    if args.unfreeze_encoder_layers is not None:
+        # Freeze entire encoder first, then selectively unfreeze last N layers
+        model.freeze_encoder()
+        encoder_layers = model.model.encoder.layers
+        total_encoder_layers = len(encoder_layers)
+        n_unfreeze = min(args.unfreeze_encoder_layers, total_encoder_layers)
+        for layer in encoder_layers[-n_unfreeze:]:
+            for param in layer.parameters():
+                param.requires_grad = True
+        # Also unfreeze encoder layer norm (applied after all layers)
+        for param in model.model.encoder.layer_norm.parameters():
+            param.requires_grad = True
+        print(f"Encoder: last {n_unfreeze}/{total_encoder_layers} layers UNFROZEN.")
+        if args.encoder_lr and args.encoder_lr != args.lr:
+            print(f"  Encoder LR: {args.encoder_lr}, Decoder LR: {args.lr}")
+    elif args.freeze_encoder:
         model.freeze_encoder()
         print("Encoder is FROZEN — training decoder only.")
     else:
@@ -595,10 +650,46 @@ def main():
         if args.encoder_lr and args.encoder_lr != args.lr:
             print(f"  Encoder LR: {args.encoder_lr}, Decoder LR: {args.lr}")
 
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total params: {total_params / 1e6:.1f}M")
-    print(f"Trainable params: {trainable_params / 1e6:.1f}M")
+    # Optionally freeze first N decoder layers
+    if args.freeze_decoder_layers is not None:
+        decoder_layers = model.model.decoder.layers
+        total_decoder_layers = len(decoder_layers)
+        n_freeze = min(args.freeze_decoder_layers, total_decoder_layers)
+        for layer in decoder_layers[:n_freeze]:
+            for param in layer.parameters():
+                param.requires_grad = False
+        print(f"Decoder: first {n_freeze}/{total_decoder_layers} layers FROZEN.")
+
+    # -----------------------------------------------------------------------
+    # 7b. Optionally apply LoRA
+    # -----------------------------------------------------------------------
+    if args.lora:
+        from peft import LoraConfig, get_peft_model, TaskType
+
+        # Default target modules: all linear projections in attention + FFN
+        target_modules = args.lora_target_modules or [
+            "q_proj", "k_proj", "v_proj", "out_proj",
+            "fc1", "fc2",
+        ]
+
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules=target_modules,
+            task_type=TaskType.SEQ_2_SEQ_LM,
+        )
+
+        model = get_peft_model(model, lora_config)
+        print(f"LoRA applied (r={args.lora_r}, alpha={args.lora_alpha}, "
+              f"dropout={args.lora_dropout})")
+        print(f"  Target modules: {target_modules}")
+        model.print_trainable_parameters()
+    else:
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Total params: {total_params / 1e6:.1f}M")
+        print(f"Trainable params: {trainable_params / 1e6:.1f}M")
 
     # -----------------------------------------------------------------------
     # 8. Data collator
@@ -700,7 +791,18 @@ def main():
     # 11. Trainer
     # -----------------------------------------------------------------------
     # Use differential LR trainer when encoder is unfrozen with a separate LR
-    encoder_lr = args.encoder_lr if (not args.freeze_encoder and args.encoder_lr) else None
+    # (not used with LoRA — peft manages its own trainable params)
+    encoder_lr = None
+    if not args.lora and not args.freeze_encoder and args.encoder_lr:
+        encoder_lr = args.encoder_lr
+    callbacks = []
+    if args.early_stopping_patience > 0:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=args.early_stopping_patience
+            )
+        )
+
     trainer = DifferentialLRTrainer(
         model=model,
         args=training_args,
@@ -710,11 +812,7 @@ def main():
         compute_metrics=compute_metrics,
         processing_class=processor.feature_extractor,
         encoder_lr=encoder_lr,
-        callbacks=[
-            EarlyStoppingCallback(
-                early_stopping_patience=args.early_stopping_patience
-            )
-        ],
+        callbacks=callbacks,
     )
 
     # -----------------------------------------------------------------------
@@ -730,7 +828,15 @@ def main():
     # -----------------------------------------------------------------------
     final_dir = os.path.join(args.output_dir, "final")
     print(f"Saving final model to {final_dir}")
-    trainer.save_model(final_dir)
+
+    if args.lora and args.lora_merge_on_save:
+        # Merge LoRA weights into base model for standalone deployment
+        print("Merging LoRA weights into base model...")
+        merged_model = model.merge_and_unload()
+        merged_model.save_pretrained(final_dir)
+    else:
+        trainer.save_model(final_dir)
+
     processor.save_pretrained(final_dir)
     tokenizer.save_pretrained(final_dir)
 
