@@ -37,6 +37,13 @@ from transformers.optimization import get_scheduler
 warnings.filterwarnings(
     "ignore", message="None of the inputs have requires_grad=True"
 )
+# Suppress WhisperTokenizerFast padding warning (we use the collator correctly)
+warnings.filterwarnings(
+    "ignore", message=".*using a WhisperTokenizerFast.*"
+)
+# Also suppress via transformers logging (the warning may come from logger.warning_once)
+import logging
+logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 
 # ---------------------------------------------------------------------------
