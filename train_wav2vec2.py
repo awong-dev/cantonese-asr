@@ -583,6 +583,11 @@ def main():
             remove_columns=remove_cols_test,
             keep_in_memory=True,
         )
+        # Filter out long audio (same as no_streaming path) to avoid OOM during eval
+        eval_dataset = eval_dataset.filter(
+            lambda x: x["input_length"] < max_input_samples
+        )
+        eval_dataset = eval_dataset.remove_columns(["input_length"])
 
         print(f"Train samples (approx): {train_len}")
         print(f"Eval samples: {len(eval_dataset)}")
@@ -692,6 +697,9 @@ def main():
         remove_unused_columns=False,
         # Gradient
         max_grad_norm=1.0,
+        # Accumulate eval predictions on CPU to avoid OOM from storing all
+        # logits (num_samples × seq_len × vocab_size) on GPU at once.
+        eval_accumulation_steps=10,
     )
 
     # -----------------------------------------------------------------------
