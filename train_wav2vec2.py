@@ -107,10 +107,6 @@ def parse_args():
     parser.add_argument("--warmup", type=int, default=1000, help="Warmup steps")
     parser.add_argument("--epochs", type=int, default=15, help="Number of epochs")
     parser.add_argument(
-        "--max_audio_length", type=float, default=15.0,
-        help="Max audio length in seconds. Longer samples are skipped. (default: 15s)",
-    )
-    parser.add_argument(
         "--train_batch_size", type=int, default=4,
         help="Per-device train batch size",
     )
@@ -462,7 +458,6 @@ def main():
     # -----------------------------------------------------------------------
     has_audio_column = "audio" in common_voice["train"].column_names
     train_len = len(common_voice["train"])
-    max_input_samples = int(args.max_audio_length * 16000)
 
     if has_audio_column:
         common_voice = common_voice.cast_column(
@@ -574,11 +569,7 @@ def main():
             batched=True,
             batch_size=16,
         )
-        eval_dataset = eval_dataset.filter(
-            lambda x: x["input_length"] < max_input_samples
-        )
-        eval_dataset = eval_dataset.remove_columns(["input_length"])
-        print(f"Eval samples after filtering: {len(eval_dataset)}")
+        print(f"Eval samples: {len(eval_dataset)}")
     else:
         print("Preprocessing eval dataset...")
         eval_dataset = common_voice["test"].map(
