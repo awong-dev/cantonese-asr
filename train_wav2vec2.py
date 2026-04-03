@@ -129,6 +129,11 @@ def parse_args():
         help="Early stopping patience (number of evals without improvement)",
     )
     parser.add_argument(
+        "--eval_accumulation_steps", type=int, default=10,
+        help="Flush eval predictions to CPU every N steps to avoid OOM. "
+             "Set to 0 for no limit (default: 10)",
+    )
+    parser.add_argument(
         "--max_train_samples", type=int, default=None,
         help="Subsample training set to this many samples (shuffled). Useful for disk/memory constraints.",
     )
@@ -686,7 +691,7 @@ def main():
         max_grad_norm=1.0,
         # Accumulate eval predictions on CPU to avoid OOM from storing all
         # logits (num_samples × seq_len × vocab_size) on GPU at once.
-        eval_accumulation_steps=10,
+        eval_accumulation_steps=args.eval_accumulation_steps or None,
     )
 
     # -----------------------------------------------------------------------
