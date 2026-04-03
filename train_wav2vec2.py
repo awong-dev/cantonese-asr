@@ -9,7 +9,7 @@ Usage:
     python train_wav2vec2.py --resume_from_checkpoint
 
 Requirements:
-    pip install transformers datasets evaluate jiwer accelerate soundfile librosa
+    pip install transformers datasets evaluate jiwer accelerate torchcodec
 """
 
 import argparse
@@ -452,18 +452,13 @@ def main():
     # -----------------------------------------------------------------------
     train_len = len(common_voice["train"])
 
-    import torchaudio
-
-    resamplers = {}
+    from torchcodec.decoders import AudioDecoder
 
     def _load_audio(path):
         filepath = os.path.join(_local_clips_dir, path)
-        speech_array, sr = torchaudio.load(filepath)
-        if sr != 16000:
-            if sr not in resamplers:
-                resamplers[sr] = torchaudio.transforms.Resample(sr, 16000)
-            speech_array = resamplers[sr](speech_array)
-        return speech_array.squeeze().numpy()
+        decoder = AudioDecoder(filepath, sample_rate=16000, num_channels=1)
+        samples = decoder.get_all_samples()
+        return samples.data.squeeze().numpy()
 
     def prepare_fn(batch):
         audio_np = _load_audio(batch["path"])

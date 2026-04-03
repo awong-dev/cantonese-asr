@@ -8,7 +8,7 @@ Usage:
     python train_whisper.py --dataset_path /data/yue --write_splits --pct_test 0.05
 
 Requirements:
-    pip install transformers datasets evaluate jiwer accelerate torchaudio
+    pip install transformers datasets evaluate jiwer accelerate torchcodec
 """
 
 import argparse
@@ -20,8 +20,8 @@ from typing import Any, Dict, List, Union
 
 import evaluate
 import torch
-import torchaudio
 import numpy as np
+from torchcodec.decoders import AudioDecoder
 from datasets import Dataset, load_dataset
 from transformers import (
     EarlyStoppingCallback,
@@ -40,9 +40,6 @@ warnings.filterwarnings(
 )
 warnings.filterwarnings(
     "ignore", message=".*using a WhisperTokenizerFast.*"
-)
-warnings.filterwarnings(
-    "ignore", message=".*torchaudio.*"
 )
 import logging
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
@@ -434,20 +431,17 @@ def main():
         print(f"Subsampled train to {args.max_train_samples} samples")
 
     # -----------------------------------------------------------------------
-    # 6. Preprocessing functions (torchaudio-based)
+    # 6. Preprocessing functions (torchcodec-based)
     # -----------------------------------------------------------------------
-    # Cache resamplers by source sample rate to avoid recreating them
-    resamplers = {}
-
     def _load_audio(path):
-        """Load an audio file and resample to 16kHz if needed."""
+        """Load an audio file and resample to 16kHz using torchcodec.
+        AudioDecoder handles resampling natively via the sample_rate parameter
+        and returns float32 samples normalized to [-1, 1]."""
         filepath = os.path.join(clips_dir, path)
-        speech_array, sr = torchaudio.load(filepath)
-        if sr != 16000:
-            if sr not in resamplers:
-                resamplers[sr] = torchaudio.transforms.Resample(sr, 16000)
-            speech_array = resamplers[sr](speech_array)
-        return speech_array.squeeze().numpy()
+        decoder = AudioDecoder(filepath, sample_rate=16000, num_channels=1)
+        samples = decoder.get_all_samples()
+        # samples.data is shape [1, num_samples] — squeeze to 1D numpy
+        return samples.data.squeeze(0).numpy()
 
     def prepare_dataset(batch):
         """Preprocess a single sample: load audio → mel spectrogram → tokenize text."""
