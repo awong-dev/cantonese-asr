@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Union
 import evaluate
 import numpy as np
 import torch
-from datasets import Audio, DatasetDict, load_dataset, load_from_disk
+from datasets import DatasetDict, load_dataset
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -86,20 +86,29 @@ def parse_args():
 
     # Dataset
     parser.add_argument(
-        "--dataset", type=str, default="mozilla-foundation/common_voice_17_0",
-        help="HuggingFace dataset ID (used when --dataset_path is not set)",
-    )
-    parser.add_argument(
-        "--dataset_path", type=str, default=None,
+        "--dataset_path", type=str, required=True,
         help="Path to local Common Voice dataset (e.g. data/cv-corpus-25.0/yue)",
     )
     parser.add_argument(
-        "--train_tsv", type=str, default="train.tsv",
-        help="TSV file for training data: 'train.tsv' (default, smaller) or 'validated.tsv' (all validated samples)",
+        "--all_tsv", type=str, default="validated.tsv",
+        help="TSV file containing all usable samples (default: validated.tsv)",
     )
     parser.add_argument(
-        "--language", type=str, default="yue",
-        help="Language code for HF Hub loading",
+        "--holdback_tsv", type=str, default="",
+        help="TSV file whose samples are excluded from the available pool. "
+             "If empty, all samples in all_tsv are used (default: empty)",
+    )
+    parser.add_argument(
+        "--pct_validation", type=float, default=0.1,
+        help="Fraction of available_dataset to use for validation (default: 0.1)",
+    )
+    parser.add_argument(
+        "--pct_test", type=float, default=0.1,
+        help="Fraction of available_dataset to use for test (default: 0.1)",
+    )
+    parser.add_argument(
+        "--write_splits", action="store_true",
+        help="Write train/validation/test split TSV files to current directory",
     )
 
     # Training
@@ -129,9 +138,9 @@ def parse_args():
         help="Early stopping patience (number of evals without improvement)",
     )
     parser.add_argument(
-        "--eval_accumulation_steps", type=int, default=10,
+        "--eval_accumulation_steps", type=int, default=128,
         help="Flush eval predictions to CPU every N steps to avoid OOM. "
-             "Set to 0 for no limit (default: 10)",
+             "Set to 0 for no limit (default: 128)",
     )
     parser.add_argument(
         "--max_train_samples", type=int, default=None,
@@ -161,13 +170,13 @@ def parse_args():
     # Caching
     parser.add_argument(
         "--no_streaming", action="store_true",
-        help="Disable streaming and preprocess all data upfront (uses disk cache). "
+        help="Disable streaming for training: preprocess all data upfront (uses disk cache). "
              "Faster training but requires disk space for cached features.",
     )
     parser.add_argument(
-        "--no_streaming_eval", action="store_true",
-        help="Preprocess eval data upfront with disk cache (batched) even when "
-             "training uses streaming. Useful to avoid eval OOM from on-the-fly processing.",
+        "--streaming_eval", action="store_true",
+        help="Use streaming for eval instead of preprocessing upfront. "
+             "Saves disk space but may be slower.",
     )
     parser.add_argument(
         "--cache_dir", type=str, default=None,
@@ -272,109 +281,84 @@ def main():
     # -----------------------------------------------------------------------
     # 6. Load dataset
     # -----------------------------------------------------------------------
-    _local_clips_dir = None  # set when loading local TSV layout
+    print(f"Loading dataset from local path: {args.dataset_path}")
+    local_path = Path(args.dataset_path)
+    _local_clips_dir = str(local_path / "clips")
 
-    if args.dataset_path:
-        print(f"Loading dataset from local path: {args.dataset_path}")
-        local_path = Path(args.dataset_path)
+    # Load all usable samples and optionally exclude holdback
+    all_tsv = local_path / args.all_tsv
 
-        if (local_path / "dataset_dict.json").exists():
-            # Previously saved via dataset.save_to_disk()
-            common_voice = load_from_disk(str(local_path))
-            if "train" in common_voice and "validation" in common_voice:
-                from datasets import concatenate_datasets
-                common_voice = DatasetDict({
-                    "train": concatenate_datasets([
-                        common_voice["train"], common_voice["validation"]
-                    ]),
-                    "test": common_voice["test"],
-                })
-        elif (local_path / args.train_tsv).exists():
-            # Standard Common Voice extracted archive:
-            #   yue/clips/*.mp3, yue/train.tsv, yue/test.tsv, etc.
-            _local_clips_dir = str(local_path / "clips")
-            common_voice = DatasetDict()
-            common_voice["train"] = load_dataset(
-                "csv",
-                data_files=str(local_path / args.train_tsv),
-                delimiter="\t",
-                split="train",
-            )
-            common_voice["test"] = load_dataset(
-                "csv",
-                data_files=str(local_path / "test.tsv"),
-                delimiter="\t",
-                split="train",  # CSV loader only has "train" split
-            )
-        else:
-            common_voice = DatasetDict()
-            common_voice["train"] = load_dataset(
-                str(local_path), split="train+validation", trust_remote_code=True
-            )
-            common_voice["test"] = load_dataset(
-                str(local_path), split="test", trust_remote_code=True
-            )
+    if not all_tsv.exists():
+        raise FileNotFoundError(f"all_tsv not found: {all_tsv}")
+
+    all_dataset = load_dataset(
+        "csv", data_files=str(all_tsv), delimiter="\t", split="train",
+    )
+    print(f"All samples: {len(all_dataset)}")
+
+    if args.holdback_tsv:
+        holdback_tsv = local_path / args.holdback_tsv
+        if not holdback_tsv.exists():
+            raise FileNotFoundError(f"holdback_tsv not found: {holdback_tsv}")
+        holdback_dataset = load_dataset(
+            "csv", data_files=str(holdback_tsv), delimiter="\t", split="train",
+        )
+        holdback_paths = set(holdback_dataset["path"])
+        available_dataset = all_dataset.filter(
+            lambda x: x["path"] not in holdback_paths
+        )
+        print(f"Holdback samples: {len(holdback_dataset)}")
     else:
-        print(f"Loading dataset: {args.dataset} ({args.language})")
-        common_voice = DatasetDict()
-        common_voice["train"] = load_dataset(
-            args.dataset, args.language, split="train+validation",
-            trust_remote_code=True,
-        )
-        common_voice["test"] = load_dataset(
-            args.dataset, args.language, split="test", trust_remote_code=True,
-        )
+        holdback_dataset = None
+        available_dataset = all_dataset
+
+    print(f"Available samples: {len(available_dataset)}")
 
     # Detect text column
-    text_col = "sentence" if "sentence" in common_voice["train"].column_names else "text"
+    text_col = "sentence" if "sentence" in available_dataset.column_names else "text"
 
-    # Remove unnecessary columns — keep audio/path + text
-    audio_col = "audio" if "audio" in common_voice["train"].column_names else "path"
-    keep_cols = {audio_col, text_col}
+    # Remove unnecessary columns — keep path + text
+    keep_cols = {"path", text_col}
     cols_to_remove = [
-        c for c in common_voice["train"].column_names if c not in keep_cols
+        c for c in available_dataset.column_names if c not in keep_cols
     ]
     if cols_to_remove:
-        common_voice = common_voice.remove_columns(cols_to_remove)
+        available_dataset = available_dataset.remove_columns(cols_to_remove)
 
     # Normalize column names
     if text_col != "sentence":
-        common_voice = common_voice.rename_column(text_col, "sentence")
+        available_dataset = available_dataset.rename_column(text_col, "sentence")
 
-    # ---- Remove any test samples that leaked into the training set ----
-    # Use the "path" column (or audio["path"]) as unique identifier.
-    if "path" in common_voice["test"].column_names:
-        test_paths = set(common_voice["test"]["path"])
-        train_before = len(common_voice["train"])
-        common_voice["train"] = common_voice["train"].filter(
-            lambda x: x["path"] not in test_paths
-        )
-        n_removed = train_before - len(common_voice["train"])
-        if n_removed:
-            print(f"Removed {n_removed} test-overlapping samples from training set")
-    elif "audio" in common_voice["test"].column_names:
-        # HF datasets store path inside the audio dict
-        test_paths = set(
-            ex["path"] for ex in common_voice["test"]["audio"] if ex.get("path")
-        )
-        if test_paths:
-            train_before = len(common_voice["train"])
-            common_voice["train"] = common_voice["train"].filter(
-                lambda x: x["audio"]["path"] not in test_paths
-            )
-            n_removed = train_before - len(common_voice["train"])
-            if n_removed:
-                print(f"Removed {n_removed} test-overlapping samples from training set")
-    else:
-        print("Warning: no 'path' or 'audio' column found — skipping deduplication")
+    # Split available_dataset into train / validation / test
+    assert args.pct_validation + args.pct_test < 1.0, (
+        "pct_validation + pct_test must be less than 1.0"
+    )
+    available_dataset = available_dataset.shuffle(seed=args.seed)
+    n_available = len(available_dataset)
+    n_validation = int(n_available * args.pct_validation)
+    n_test = int(n_available * args.pct_test)
+    n_train = n_available - n_validation - n_test
+
+    common_voice = DatasetDict({
+        "train": available_dataset.select(range(n_train)),
+        "validation": available_dataset.select(range(n_train, n_train + n_validation)),
+        "test": available_dataset.select(range(n_train + n_validation, n_available)),
+    })
 
     print(f"Train samples: {len(common_voice['train'])}")
+    print(f"Validation samples: {len(common_voice['validation'])}")
     print(f"Test samples: {len(common_voice['test'])}")
 
-    # Shuffle and optionally subsample training set
-    common_voice["train"] = common_voice["train"].shuffle(seed=args.seed)
+    # Optionally write split files
+    if args.write_splits:
+        for split_name in ("train", "validation", "test"):
+            out_path = f"{split_name}_split.tsv"
+            common_voice[split_name].to_csv(out_path, sep="\t", index=False)
+            print(f"Wrote {out_path} ({len(common_voice[split_name])} samples)")
+
+    # Optionally subsample training set
     if args.max_train_samples and args.max_train_samples < len(common_voice["train"]):
-        common_voice["train"] = common_voice["train"].select(
+        common_voice["train"] = common_voice["train"].shuffle(seed=args.seed).select(
             range(args.max_train_samples)
         )
         print(f"Subsampled to {args.max_train_samples} train samples")
@@ -389,6 +373,17 @@ def main():
         return batch
 
     common_voice = common_voice.map(apply_text_cleaning)
+
+    if holdback_dataset is not None:
+        # Clean holdback text and keep only path + sentence
+        text_col_hb = "sentence" if "sentence" in holdback_dataset.column_names else "text"
+        keep_cols_hb = {"path", text_col_hb}
+        cols_remove_hb = [c for c in holdback_dataset.column_names if c not in keep_cols_hb]
+        if cols_remove_hb:
+            holdback_dataset = holdback_dataset.remove_columns(cols_remove_hb)
+        if text_col_hb != "sentence":
+            holdback_dataset = holdback_dataset.rename_column(text_col_hb, "sentence")
+        holdback_dataset = holdback_dataset.map(apply_text_cleaning)
 
     # -----------------------------------------------------------------------
     # 7b. Vocabulary + processor
@@ -406,27 +401,21 @@ def main():
         processor.save_pretrained(args.output_dir)
         print(f"Vocabulary size: {len(processor.tokenizer)} (reused from checkpoint)")
     else:
-        # Build character vocabulary from train + test
+        # Build character vocabulary from train + validation + test
         print("Building vocabulary...")
 
         def extract_chars(batch):
             all_text = " ".join(batch["sentence"])
             return {"vocab": [list(set(all_text))]}
 
-        vocab_train = common_voice["train"].map(
-            extract_chars, batched=True, batch_size=1000,
-            remove_columns=common_voice["train"].column_names,
-        )
-        vocab_test = common_voice["test"].map(
-            extract_chars, batched=True, batch_size=1000,
-            remove_columns=common_voice["test"].column_names,
-        )
-
         all_chars = set()
-        for row in vocab_train:
-            all_chars.update(row["vocab"])
-        for row in vocab_test:
-            all_chars.update(row["vocab"])
+        for split_name in ("train", "validation", "test"):
+            vocab_split = common_voice[split_name].map(
+                extract_chars, batched=True, batch_size=1000,
+                remove_columns=common_voice[split_name].column_names,
+            )
+            for row in vocab_split:
+                all_chars.update(row["vocab"])
 
         # Remove ASCII characters (map to [UNK]), keep space for word delimiter
         vocab_list = sorted([c for c in all_chars if not c.isascii()])
@@ -461,91 +450,52 @@ def main():
     # -----------------------------------------------------------------------
     # 9. Audio loading + feature extraction
     # -----------------------------------------------------------------------
-    has_audio_column = "audio" in common_voice["train"].column_names
     train_len = len(common_voice["train"])
 
-    if has_audio_column:
-        common_voice = common_voice.cast_column(
-            "audio", Audio(sampling_rate=16000)
-        )
+    import torchaudio
 
-        def prepare_features(batch):
-            audio = batch["audio"]
-            batch["input_values"] = processor(
-                audio["array"], sampling_rate=16000,
-            ).input_values[0]
-            batch["labels"] = processor.tokenizer(
-                batch["sentence"],
-            ).input_ids
-            batch["input_length"] = len(audio["array"])
-            return batch
+    resamplers = {}
 
-        def prepare_features_batched(batch):
-            batch["input_values"] = processor(
-                [a["array"] for a in batch["audio"]],
-                sampling_rate=16000,
-                padding=False,
-            ).input_values
-            batch["labels"] = [
-                processor.tokenizer(s).input_ids for s in batch["sentence"]
-            ]
-            batch["input_length"] = [len(a["array"]) for a in batch["audio"]]
-            return batch
+    def _load_audio(path):
+        filepath = os.path.join(_local_clips_dir, path)
+        speech_array, sr = torchaudio.load(filepath)
+        if sr != 16000:
+            if sr not in resamplers:
+                resamplers[sr] = torchaudio.transforms.Resample(sr, 16000)
+            speech_array = resamplers[sr](speech_array)
+        return speech_array.squeeze().numpy()
 
-        prepare_fn = prepare_features
-        prepare_fn_batched = prepare_features_batched
-    else:
-        import torchaudio
+    def prepare_fn(batch):
+        audio_np = _load_audio(batch["path"])
+        batch["input_values"] = processor(
+            audio_np, sampling_rate=16000,
+        ).input_values[0]
+        batch["labels"] = processor.tokenizer(
+            batch["sentence"],
+        ).input_ids
+        batch["input_length"] = len(audio_np)
+        return batch
 
-        if _local_clips_dir is None:
-            raise ValueError(
-                "Dataset has 'path' column but no clips directory found. "
-                "Use --dataset_path pointing to the Common Voice language dir."
-            )
-
-        resamplers = {}
-
-        def _load_audio(path):
-            filepath = os.path.join(_local_clips_dir, path)
-            speech_array, sr = torchaudio.load(filepath)
-            if sr != 16000:
-                if sr not in resamplers:
-                    resamplers[sr] = torchaudio.transforms.Resample(sr, 16000)
-                speech_array = resamplers[sr](speech_array)
-            return speech_array.squeeze().numpy()
-
-        def prepare_features_from_path(batch):
-            audio_np = _load_audio(batch["path"])
-            batch["input_values"] = processor(
-                audio_np, sampling_rate=16000,
-            ).input_values[0]
-            batch["labels"] = processor.tokenizer(
-                batch["sentence"],
-            ).input_ids
-            batch["input_length"] = len(audio_np)
-            return batch
-
-        def prepare_features_from_path_batched(batch):
-            audio_arrays = [_load_audio(p) for p in batch["path"]]
-            batch["input_values"] = processor(
-                audio_arrays, sampling_rate=16000,
-                padding=False,
-            ).input_values
-            batch["labels"] = [
-                processor.tokenizer(s).input_ids for s in batch["sentence"]
-            ]
-            batch["input_length"] = [len(a) for a in audio_arrays]
-            return batch
-
-        prepare_fn = prepare_features_from_path
-        prepare_fn_batched = prepare_features_from_path_batched
+    def prepare_fn_batched(batch):
+        audio_arrays = [_load_audio(p) for p in batch["path"]]
+        batch["input_values"] = processor(
+            audio_arrays, sampling_rate=16000,
+            padding=False,
+        ).input_values
+        batch["labels"] = [
+            processor.tokenizer(s).input_ids for s in batch["sentence"]
+        ]
+        batch["input_length"] = [len(a) for a in audio_arrays]
+        return batch
 
     remove_cols_train = common_voice.column_names["train"]
+    remove_cols_val = common_voice.column_names["validation"]
     remove_cols_test = common_voice.column_names["test"]
 
-    cache_eval = args.no_streaming or args.no_streaming_eval
+    stream_train = not args.no_streaming
+    cache_eval = not args.streaming_eval
 
-    if args.no_streaming:
+    if not stream_train:
         # ---- Disk cache mode: preprocess everything upfront (batched) ----
         print("Preprocessing training dataset (disk cache, batched)...")
         train_dataset = common_voice["train"].map(
@@ -567,22 +517,46 @@ def main():
         print(f"Train samples (approx): {train_len}")
 
     if cache_eval:
-        print("Preprocessing eval dataset (disk cache, batched)...")
-        eval_dataset = common_voice["test"].map(
+        print("Preprocessing validation dataset (disk cache, batched)...")
+        eval_dataset = common_voice["validation"].map(
             prepare_fn_batched,
-            remove_columns=remove_cols_test,
+            remove_columns=remove_cols_val,
             batched=True,
             batch_size=16,
         )
-        print(f"Eval samples: {len(eval_dataset)}")
+        print(f"Validation samples: {len(eval_dataset)}")
     else:
-        print("Preprocessing eval dataset...")
-        eval_dataset = common_voice["test"].map(
+        print("Preprocessing validation dataset...")
+        eval_dataset = common_voice["validation"].map(
             prepare_fn,
-            remove_columns=remove_cols_test,
+            remove_columns=remove_cols_val,
             keep_in_memory=True,
         )
-        print(f"Eval samples: {len(eval_dataset)}")
+        print(f"Validation samples: {len(eval_dataset)}")
+
+    # Preprocess test dataset (always cached, used for final evaluation)
+    print("Preprocessing test dataset (disk cache, batched)...")
+    test_dataset = common_voice["test"].map(
+        prepare_fn_batched,
+        remove_columns=remove_cols_test,
+        batched=True,
+        batch_size=16,
+    )
+    print(f"Test samples: {len(test_dataset)}")
+
+    # Preprocess holdback dataset if present (for final evaluation only)
+    if holdback_dataset is not None:
+        print("Preprocessing holdback dataset (disk cache, batched)...")
+        remove_cols_holdback = holdback_dataset.column_names
+        holdback_prepared = holdback_dataset.map(
+            prepare_fn_batched,
+            remove_columns=remove_cols_holdback,
+            batched=True,
+            batch_size=16,
+        )
+        print(f"Holdback samples: {len(holdback_prepared)}")
+    else:
+        holdback_prepared = None
 
     # Subsample number of eval.
     if args.max_eval_samples and args.max_eval_samples < len(eval_dataset):
@@ -646,7 +620,7 @@ def main():
     # 12. Training arguments
     # -----------------------------------------------------------------------
     # IterableDataset needs max_steps; regular Dataset can use num_train_epochs
-    if args.no_streaming:
+    if not stream_train:
         epoch_or_steps_args = {"num_train_epochs": args.epochs}
     else:
         steps_per_epoch = train_len // (args.train_batch_size * args.grad_accum)
@@ -733,7 +707,24 @@ def main():
     trainer.save_model(final_dir)
     processor.save_pretrained(final_dir)
 
-    print("Done!")
+    # -----------------------------------------------------------------------
+    # 16. Final evaluation on validation and test splits
+    # -----------------------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("Final evaluation (best model)")
+    print("=" * 60)
+
+    val_metrics = trainer.evaluate(eval_dataset=eval_dataset, metric_key_prefix="val")
+    print(f"Validation CER: {val_metrics['val_cer']:.4f}")
+
+    test_metrics = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix="test")
+    print(f"Test CER: {test_metrics['test_cer']:.4f}")
+
+    if holdback_prepared is not None:
+        holdback_metrics = trainer.evaluate(eval_dataset=holdback_prepared, metric_key_prefix="holdback")
+        print(f"Holdback CER: {holdback_metrics['holdback_cer']:.4f}")
+
+    print("\nDone!")
 
 
 if __name__ == "__main__":
