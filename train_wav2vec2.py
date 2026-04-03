@@ -164,6 +164,11 @@ def parse_args():
              "Faster training but requires disk space for cached features.",
     )
     parser.add_argument(
+        "--no_streaming_eval", action="store_true",
+        help="Preprocess eval data upfront with disk cache (batched) even when "
+             "training uses streaming. Useful to avoid eval OOM from on-the-fly processing.",
+    )
+    parser.add_argument(
         "--cache_dir", type=str, default=None,
         help="Directory for HF dataset cache (default: ~/.cache/huggingface). "
              "Use when default disk is too small.",
@@ -538,6 +543,8 @@ def main():
     remove_cols_train = common_voice.column_names["train"]
     remove_cols_test = common_voice.column_names["test"]
 
+    cache_eval = args.no_streaming or args.no_streaming_eval
+
     if args.no_streaming:
         # ---- Disk cache mode: preprocess everything upfront (batched) ----
         print("Preprocessing training dataset (disk cache, batched)...")
@@ -547,11 +554,19 @@ def main():
             batched=True,
             batch_size=16,
         )
-        train_dataset = train_dataset.filter(
-            lambda x: x["input_length"] < max_input_samples
+        train_len = len(train_dataset)
+        print(f"Train samples: {train_len}")
+    else:
+        # ---- Streaming mode: process on-the-fly, no disk cache ----
+        print("Setting up streaming training dataset...")
+        train_dataset = (
+            common_voice["train"]
+            .to_iterable_dataset(num_shards=max(1, train_len // 5000))
+            .map(prepare_fn, remove_columns=remove_cols_train)
         )
-        train_dataset = train_dataset.remove_columns(["input_length"])
+        print(f"Train samples (approx): {train_len}")
 
+    if cache_eval:
         print("Preprocessing eval dataset (disk cache, batched)...")
         eval_dataset = common_voice["test"].map(
             prepare_fn_batched,
@@ -563,33 +578,14 @@ def main():
             lambda x: x["input_length"] < max_input_samples
         )
         eval_dataset = eval_dataset.remove_columns(["input_length"])
-
-        train_len = len(train_dataset)
-        print(f"Train samples after filtering: {train_len}")
         print(f"Eval samples after filtering: {len(eval_dataset)}")
     else:
-        # ---- Streaming mode: process on-the-fly, no disk cache ----
-        print("Setting up streaming training dataset...")
-        train_dataset = (
-            common_voice["train"]
-            .to_iterable_dataset(num_shards=max(1, train_len // 5000))
-            .map(prepare_fn, remove_columns=remove_cols_train)
-            .filter(lambda x: x["input_length"] < max_input_samples)
-        )
-
         print("Preprocessing eval dataset...")
         eval_dataset = common_voice["test"].map(
             prepare_fn,
             remove_columns=remove_cols_test,
             keep_in_memory=True,
         )
-        # Filter out long audio (same as no_streaming path) to avoid OOM during eval
-        eval_dataset = eval_dataset.filter(
-            lambda x: x["input_length"] < max_input_samples
-        )
-        eval_dataset = eval_dataset.remove_columns(["input_length"])
-
-        print(f"Train samples (approx): {train_len}")
         print(f"Eval samples: {len(eval_dataset)}")
 
     # Subsample number of eval.
