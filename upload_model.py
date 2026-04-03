@@ -19,6 +19,33 @@ Usage:
         --base_model facebook/wav2vec2-xls-r-1b \
         --trainer_state ./wav2vec2-xls-r-1b-cantonese-yue/checkpoint-15000/trainer_state.json
 
+    # Push to a specific branch (creates branch if needed):
+    python upload_model.py --model_path ./whisper-large-v3-turbo-yue/final \
+        --repo_name whisper-large-v3-turbo-cantonese-yue \
+        --revision v2 --commit_message "v2: retrained with augmented data"
+
+    # Create a tagged revision from the current main:
+    python upload_model.py --model_path ./whisper-large-v3-turbo-yue/final \
+        --repo_name whisper-large-v3-turbo-cantonese-yue \
+        --revision checkpoint-15000 --create_tag
+
+    # List existing revisions for a repo:
+    python upload_model.py --repo_name whisper-large-v3-turbo-cantonese-yue \
+        --list_revisions
+
+    # Upload with TensorBoard runs (auto-detected from model_path parent):
+    python upload_model.py --model_path ./whisper-large-v3-turbo-yue/final \
+        --repo_name whisper-large-v3-turbo-cantonese-yue
+
+    # Specify a custom runs directory:
+    python upload_model.py --model_path ./whisper-large-v3-turbo-yue/final \
+        --repo_name whisper-large-v3-turbo-cantonese-yue \
+        --runs_dir ./whisper-large-v3-turbo-yue/runs
+
+    # Skip uploading TensorBoard runs:
+    python upload_model.py --model_path ./whisper-large-v3-turbo-yue/final \
+        --repo_name whisper-large-v3-turbo-cantonese-yue --no_runs
+
 Requirements:
     pip install huggingface_hub transformers
     huggingface-cli login  (or set HF_TOKEN env var)
@@ -33,8 +60,9 @@ from huggingface_hub import HfApi, create_repo
 def parse_args():
     parser = argparse.ArgumentParser(description="Upload model to HuggingFace Hub")
     parser.add_argument(
-        "--model_path", type=str, required=True,
-        help="Path to the model directory (checkpoint or final)",
+        "--model_path", type=str, default=None,
+        help="Path to the model directory (checkpoint or final). "
+             "Required unless using --list_revisions.",
     )
     parser.add_argument(
         "--repo_name", type=str, required=True,
@@ -76,6 +104,28 @@ def parse_args():
         "--commit_message", type=str, default="Upload fine-tuned model",
         help="Commit message",
     )
+    parser.add_argument(
+        "--revision", type=str, default=None,
+        help="Branch/revision name to push to (e.g. v2, checkpoint-15000). "
+             "Creates the branch if it doesn't exist. Defaults to 'main'.",
+    )
+    parser.add_argument(
+        "--create_tag", action="store_true",
+        help="Create a git tag instead of a branch for --revision",
+    )
+    parser.add_argument(
+        "--list_revisions", action="store_true",
+        help="List existing branches and tags for the repo, then exit",
+    )
+    parser.add_argument(
+        "--runs_dir", type=str, default=None,
+        help="Path to TensorBoard runs directory to upload. "
+             "Auto-detected from model_path parent if not set (looks for 'runs/' dir).",
+    )
+    parser.add_argument(
+        "--no_runs", action="store_true",
+        help="Skip uploading TensorBoard runs even if a runs directory is found",
+    )
     return parser.parse_args()
 
 
@@ -98,6 +148,37 @@ def find_trainer_state(model_path: Path) -> Path | None:
         return checkpoints[-1]
 
     return None
+
+
+def find_runs_dir(model_path: Path) -> Path | None:
+    """Search for a TensorBoard runs directory near model_path.
+
+    Looks for directories named 'runs' containing tfevents files, checking:
+      1. model_path/runs/
+      2. model_path/../runs/
+      3. model_path/../../runs/
+    """
+    search_roots = [model_path, model_path.parent, model_path.parent.parent]
+    for root in search_roots:
+        candidate = root / "runs"
+        if candidate.is_dir() and list(candidate.rglob("events.out.tfevents.*")):
+            return candidate
+    return None
+
+
+def summarize_runs_dir(runs_dir: Path) -> None:
+    """Print a summary of a TensorBoard runs directory."""
+    tfevents = sorted(runs_dir.rglob("events.out.tfevents.*"))
+    subdirs = sorted({f.parent.relative_to(runs_dir) for f in tfevents})
+
+    total_size = sum(f.stat().st_size for f in runs_dir.rglob("*") if f.is_file())
+    print(f"\nTensorBoard runs: {runs_dir}")
+    print(f"  Event files: {len(tfevents)}")
+    print(f"  Run subdirs: {len(subdirs)}")
+    for sd in subdirs:
+        n = sum(1 for f in tfevents if f.parent.relative_to(runs_dir) == sd)
+        print(f"    {sd}/ ({n} event file{'s' if n != 1 else ''})")
+    print(f"  Total size: {total_size / 1e6:.1f} MB")
 
 
 def parse_training_stats(trainer_state_path: Path) -> dict:
@@ -152,7 +233,7 @@ def detect_model_type(model_path: Path) -> str:
     return "unknown"
 
 
-def generate_model_card(args, stats: dict | None, model_type: str) -> str:
+def generate_model_card(args, stats: dict | None, model_type: str, has_runs: bool = False) -> str:
     """Generate a HuggingFace model card (README.md)."""
     repo_id = f"{args.username}/{args.repo_name}"
 
@@ -213,6 +294,11 @@ def generate_model_card(args, stats: dict | None, model_type: str) -> str:
         f"# {args.repo_name}",
         "",
     ]
+
+    revision = getattr(args, "revision", None)
+    if revision:
+        md_lines.append(f"> **Revision:** `{revision}`")
+        md_lines.append("")
 
     if args.base_model:
         md_lines.append(
@@ -278,8 +364,27 @@ def generate_model_card(args, stats: dict | None, model_type: str) -> str:
     if stats and stats.get("total_steps"):
         md_lines.append(f"- **Total training steps:** {stats['total_steps']}")
 
+    # TensorBoard
+    if has_runs:
+        md_lines.extend([
+            "",
+            "## Training Metrics",
+            "",
+            "TensorBoard logs are included in the `runs/` directory of this repository.",
+            "",
+            "```bash",
+            f"# Clone and view locally",
+            f"git clone https://huggingface.co/{repo_id}",
+            f"tensorboard --logdir {args.repo_name}/runs",
+            "```",
+        ])
+
     # Usage
     md_lines.extend(["", "## Usage", ""])
+
+    # Build revision kwarg string for usage examples
+    revision = getattr(args, "revision", None)
+    rev_kwarg = f', revision="{revision}"' if revision else ""
 
     if model_type == "whisper":
         md_lines.extend([
@@ -287,8 +392,8 @@ def generate_model_card(args, stats: dict | None, model_type: str) -> str:
             "from transformers import WhisperForConditionalGeneration, WhisperProcessor",
             "import torchaudio",
             "",
-            f'processor = WhisperProcessor.from_pretrained("{repo_id}")',
-            f'model = WhisperForConditionalGeneration.from_pretrained("{repo_id}")',
+            f'processor = WhisperProcessor.from_pretrained("{repo_id}"{rev_kwarg})',
+            f'model = WhisperForConditionalGeneration.from_pretrained("{repo_id}"{rev_kwarg})',
             "",
             "# Load audio",
             'audio, sr = torchaudio.load("audio.mp3")',
@@ -311,8 +416,8 @@ def generate_model_card(args, stats: dict | None, model_type: str) -> str:
             "import torchaudio",
             "import torch",
             "",
-            f'processor = Wav2Vec2Processor.from_pretrained("{repo_id}")',
-            f'model = Wav2Vec2ForCTC.from_pretrained("{repo_id}")',
+            f'processor = Wav2Vec2Processor.from_pretrained("{repo_id}"{rev_kwarg})',
+            f'model = Wav2Vec2ForCTC.from_pretrained("{repo_id}"{rev_kwarg})',
             "",
             "# Load audio",
             'audio, sr = torchaudio.load("audio.mp3")',
@@ -331,11 +436,48 @@ def generate_model_card(args, stats: dict | None, model_type: str) -> str:
     return "\n".join(yaml_lines) + "\n" + "\n".join(md_lines) + "\n"
 
 
+def list_repo_revisions(repo_id: str) -> None:
+    """List all branches and tags for a HuggingFace repo."""
+    api = HfApi()
+    try:
+        refs = api.list_repo_refs(repo_id)
+    except Exception as e:
+        print(f"Error listing revisions for {repo_id}: {e}")
+        return
+
+    print(f"\nRevisions for {repo_id}:")
+    print(f"  {'='*50}")
+
+    print(f"\n  Branches:")
+    if refs.branches:
+        for branch in refs.branches:
+            prefix = "  * " if branch.name == "main" else "    "
+            print(f"{prefix}{branch.name} ({branch.target_commit[:8]})")
+    else:
+        print("    (none)")
+
+    print(f"\n  Tags:")
+    if refs.tags:
+        for tag in refs.tags:
+            print(f"    {tag.name} ({tag.target_commit[:8]})")
+    else:
+        print("    (none)")
+
+    print()
+
+
 def main():
     args = parse_args()
 
-    model_path = Path(args.model_path)
-    if not model_path.exists():
+    repo_id = f"{args.username}/{args.repo_name}"
+
+    # Handle --list_revisions: no model_path needed
+    if args.list_revisions:
+        list_repo_revisions(repo_id)
+        return
+
+    model_path = Path(args.model_path) if args.model_path else None
+    if model_path is None or not model_path.exists():
         raise FileNotFoundError(f"Model path not found: {model_path}")
 
     repo_id = f"{args.username}/{args.repo_name}"
@@ -373,8 +515,24 @@ def main():
     else:
         print("No trainer_state.json found — using manual --cer if provided")
 
+    # Find TensorBoard runs directory
+    runs_dir = None
+    if not args.no_runs:
+        if args.runs_dir:
+            runs_dir = Path(args.runs_dir)
+            if not runs_dir.is_dir():
+                print(f"Warning: --runs_dir not found: {runs_dir}")
+                runs_dir = None
+        else:
+            runs_dir = find_runs_dir(model_path)
+
+        if runs_dir:
+            summarize_runs_dir(runs_dir)
+        else:
+            print("No TensorBoard runs directory found (use --runs_dir to specify)")
+
     # Generate model card
-    model_card = generate_model_card(args, stats, model_type)
+    model_card = generate_model_card(args, stats, model_type, has_runs=runs_dir is not None)
     readme_path = model_path / "README.md"
     with open(readme_path, "w") as f:
         f.write(model_card)
@@ -383,12 +541,21 @@ def main():
     # List files to upload
     files = list(model_path.rglob("*"))
     files = [f for f in files if f.is_file()]
-    print(f"\nFiles to upload: {len(files)}")
+    print(f"\nModel files to upload: {len(files)}")
     for f in sorted(files):
         size_mb = f.stat().st_size / 1e6
         print(f"  {f.relative_to(model_path)} ({size_mb:.1f} MB)")
 
-    total_size = sum(f.stat().st_size for f in files) / 1e9
+    runs_files = []
+    if runs_dir:
+        runs_files = [f for f in runs_dir.rglob("*") if f.is_file()]
+        print(f"\nTensorBoard files to upload: {len(runs_files)}")
+        for f in sorted(runs_files):
+            size_mb = f.stat().st_size / 1e6
+            print(f"  runs/{f.relative_to(runs_dir)} ({size_mb:.1f} MB)")
+
+    all_files = files + runs_files
+    total_size = sum(f.stat().st_size for f in all_files) / 1e9
     print(f"Total size: {total_size:.2f} GB")
 
     # Preview model card
@@ -399,7 +566,9 @@ def main():
     print("=" * 60)
 
     # Confirm
-    response = input(f"\nUpload to {repo_id}? [y/N] ")
+    revision_label = f" (revision: {args.revision})" if args.revision else ""
+    tag_label = " [as tag]" if args.create_tag else ""
+    response = input(f"\nUpload to {repo_id}{revision_label}{tag_label}? [y/N] ")
     if response.lower() != "y":
         print("Cancelled.")
         return
@@ -409,14 +578,56 @@ def main():
     create_repo(repo_id, private=args.private, exist_ok=True)
     print(f"Repository ready: https://huggingface.co/{repo_id}")
 
-    print("Uploading...")
+    # Determine the target branch for upload
+    upload_branch = args.revision if (args.revision and not args.create_tag) else None
+
+    # Create branch if needed (skip for tags — we upload to main first, then tag)
+    if upload_branch and upload_branch != "main":
+        try:
+            refs = api.list_repo_refs(repo_id)
+            existing_branches = {b.name for b in refs.branches}
+            if upload_branch not in existing_branches:
+                print(f"Creating branch '{upload_branch}'...")
+                api.create_branch(repo_id, branch=upload_branch)
+        except Exception as e:
+            print(f"Note: could not verify/create branch: {e}")
+            print(f"Attempting upload to '{upload_branch}' anyway...")
+
+    print(f"Uploading model to {'branch ' + upload_branch if upload_branch else 'main'}...")
     api.upload_folder(
         folder_path=str(model_path),
         repo_id=repo_id,
+        revision=upload_branch,
         commit_message=args.commit_message,
     )
 
-    print(f"Done! Model available at: https://huggingface.co/{repo_id}")
+    # Upload TensorBoard runs directory
+    if runs_dir:
+        runs_commit_msg = f"{args.commit_message} (TensorBoard runs)"
+        print(f"Uploading TensorBoard runs from {runs_dir}...")
+        api.upload_folder(
+            folder_path=str(runs_dir),
+            repo_id=repo_id,
+            path_in_repo="runs",
+            revision=upload_branch,
+            commit_message=runs_commit_msg,
+        )
+
+    # Create tag if requested
+    if args.create_tag and args.revision:
+        print(f"Creating tag '{args.revision}'...")
+        try:
+            api.create_tag(
+                repo_id,
+                tag=args.revision,
+                tag_message=args.commit_message,
+            )
+            print(f"Tag '{args.revision}' created.")
+        except Exception as e:
+            print(f"Warning: failed to create tag '{args.revision}': {e}")
+
+    revision_suffix = f"?revision={args.revision}" if args.revision else ""
+    print(f"Done! Model available at: https://huggingface.co/{repo_id}{revision_suffix}")
 
 
 if __name__ == "__main__":
