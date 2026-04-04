@@ -718,12 +718,12 @@ def main():
         # Optionally compute normalized CER using jiwer pipeline
         # (removes punctuation, lowercases, normalizes whitespace)
         if _cer_transform is not None:
-            cer_norm = jiwer.cer(
+            output = jiwer.process_characters(
                 label_list, pred_list,
-                truth_transform=_cer_transform,
+                reference_transform=_cer_transform,
                 hypothesis_transform=_cer_transform,
             )
-            result["cer_nopunct"] = cer_norm
+            result["cer_nopunct"] = output.cer
 
         # Log sample predictions for debugging
         for i in range(min(5, len(pred_str))):

@@ -119,8 +119,8 @@ def parse_args():
         help="Per-device train batch size",
     )
     parser.add_argument(
-        "--eval_batch_size", type=int, default=None,
-        help="Per-device eval batch size (default: same as train_batch_size)",
+        "--eval_batch_size", type=int, default=4,
+        help="Per-device eval batch size (default: 4)",
     )
     parser.add_argument(
         "--grad_accum", type=int, default=4,
@@ -137,9 +137,9 @@ def parse_args():
         help="Early stopping patience (number of evals without improvement)",
     )
     parser.add_argument(
-        "--eval_accumulation_steps", type=int, default=128,
+        "--eval_accumulation_steps", type=int, default=16,
         help="Flush eval predictions to CPU every N steps to avoid OOM. "
-             "Set to 0 for no limit (default: 128)",
+             "Set to 0 for no limit (default: 16)",
     )
     parser.add_argument(
         "--max_train_samples", type=int, default=None,
@@ -199,16 +199,6 @@ _text_normalize = jiwer.Compose([
     jiwer.RemoveWhiteSpace(replace_by_space=True),
     jiwer.RemoveMultipleSpaces(),
     jiwer.Strip(),
-])
-
-# CER transform adds character-level splitting on top of normalization
-_cer_transform = jiwer.Compose([
-    jiwer.RemovePunctuation(),
-    jiwer.ToLowerCase(),
-    jiwer.RemoveWhiteSpace(replace_by_space=True),
-    jiwer.RemoveMultipleSpaces(),
-    jiwer.Strip(),
-    jiwer.ReduceToListOfListOfChars(),
 ])
 
 
@@ -635,11 +625,12 @@ def main():
         cer_raw = cer_metric.compute(predictions=pred_list, references=label_list)
 
         # Normalized CER (punctuation removed, lowercased, whitespace normalized)
-        cer_nopunct = jiwer.cer(
+        cer_nopunct_output = jiwer.process_characters(
             label_list, pred_list,
-            truth_transform=_cer_transform,
-            hypothesis_transform=_cer_transform,
+            reference_transform=_text_normalize,
+            hypothesis_transform=_text_normalize,
         )
+        cer_nopunct = cer_nopunct_output.cer
 
         return {"cer_raw": cer_raw, "cer_nopunct": cer_nopunct}
 
@@ -660,7 +651,7 @@ def main():
         output_dir=args.output_dir,
         # Batch / accumulation
         per_device_train_batch_size=args.train_batch_size,
-        per_device_eval_batch_size=args.eval_batch_size or args.train_batch_size,
+        per_device_eval_batch_size=args.eval_batch_size,
         gradient_accumulation_steps=args.grad_accum,
         # Schedule
         learning_rate=args.lr,
@@ -742,20 +733,44 @@ def main():
     print("=" * 60)
 
     def evaluate_split(dataset, split_name):
-        metrics = trainer.evaluate(eval_dataset=dataset, metric_key_prefix=split_name)
-        cer_raw = metrics.get(f"{split_name}_cer_raw", None)
-        cer_nopunct = metrics.get(f"{split_name}_cer_nopunct", None)
-        if cer_raw is not None:
-            print(f"  {split_name} CER (raw):     {cer_raw:.4f}")
-        if cer_nopunct is not None:
-            print(f"  {split_name} CER (nopunct): {cer_nopunct:.4f}")
-        return metrics
+        try:
+            metrics = trainer.evaluate(eval_dataset=dataset, metric_key_prefix=split_name)
+            cer_raw = metrics.get(f"{split_name}_cer_raw", None)
+            cer_nopunct = metrics.get(f"{split_name}_cer_nopunct", None)
+            if cer_raw is not None:
+                print(f"  {split_name} CER (raw):     {cer_raw:.4f}")
+            if cer_nopunct is not None:
+                print(f"  {split_name} CER (nopunct): {cer_nopunct:.4f}")
+            return metrics
+        except Exception as e:
+            print(f"  {split_name} evaluation failed: {e}")
+            return None
 
     val_metrics = evaluate_split(eval_dataset, "validation")
     test_metrics = evaluate_split(test_dataset, "test")
 
+    holdback_metrics = None
     if holdback_prepared is not None:
         holdback_metrics = evaluate_split(holdback_prepared, "holdback")
+
+    # ---- Summary ----
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    for name, m in [("Validation", val_metrics),
+                    ("Test", test_metrics),
+                    ("Holdback", holdback_metrics)]:
+        if m is None:
+            continue
+        prefix = name.lower()
+        cer_raw = m.get(f"{prefix}_cer_raw", None)
+        cer_nopunct = m.get(f"{prefix}_cer_nopunct", None)
+        if cer_raw is not None:
+            line = f"  {name:12s} CER (raw): {cer_raw:.4f}"
+            if cer_nopunct is not None:
+                line += f"  (nopunct: {cer_nopunct:.4f})"
+            print(line)
+    print("=" * 60)
 
     print("\nDone!")
 
