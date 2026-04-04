@@ -175,6 +175,12 @@ def parse_args():
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--max_eval_samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--nopunct_in_eval", action="store_true",
+        help="Compute an additional normalized CER alongside raw CER. "
+             "Normalization uses a jiwer pipeline that removes punctuation, "
+             "lowercases, and normalizes whitespace before computing CER.",
+    )
 
     # Streaming / caching
     parser.add_argument(
@@ -654,6 +660,21 @@ def main():
     # -----------------------------------------------------------------------
     cer_metric = evaluate.load("cer")
 
+    # Optionally set up a jiwer normalization pipeline for computing
+    # a second CER metric with punctuation, casing, and whitespace normalized
+    _cer_transform = None
+    if args.nopunct_in_eval:
+        import jiwer
+        _cer_transform = jiwer.Compose([
+            jiwer.RemovePunctuation(),
+            jiwer.ToLowerCase(),
+            jiwer.RemoveWhiteSpace(replace_by_space=True),
+            jiwer.RemoveMultipleSpaces(),
+            jiwer.Strip(),
+            jiwer.ReduceToListOfListOfChars(),
+        ])
+        print("Normalized CER enabled (RemovePunctuation + ToLowerCase + whitespace normalization)")
+
     def compute_metrics(pred):
         pred_ids = pred.predictions
         label_ids = pred.label_ids
@@ -674,11 +695,24 @@ def main():
         # Filter out empty references to avoid division by zero in CER
         pairs = [(p, l) for p, l in zip(pred_str, label_str) if len(l.strip()) > 0]
         if not pairs:
-            return {"cer": 1.0}
+            return {"cer_raw": 1.0}
         pred_str, label_str = zip(*pairs)
+        pred_list = list(pred_str)
+        label_list = list(label_str)
 
-        # Compute Character Error Rate
-        cer = cer_metric.compute(predictions=list(pred_str), references=list(label_str))
+        # Compute raw Character Error Rate
+        cer = cer_metric.compute(predictions=pred_list, references=label_list)
+        result = {"cer_raw": cer}
+
+        # Optionally compute normalized CER using jiwer pipeline
+        # (removes punctuation, lowercases, normalizes whitespace)
+        if _cer_transform is not None:
+            cer_norm = jiwer.cer(
+                label_list, pred_list,
+                truth_transform=_cer_transform,
+                hypothesis_transform=_cer_transform,
+            )
+            result["cer_nopunct"] = cer_norm
 
         # Log sample predictions for debugging
         for i in range(min(5, len(pred_str))):
@@ -686,7 +720,7 @@ def main():
             print(f"  HYP: {pred_str[i][:80]}")
             print()
 
-        return {"cer": cer}
+        return result
 
     # -----------------------------------------------------------------------
     # 10. Training arguments
@@ -743,12 +777,14 @@ def main():
         report_to=["tensorboard"],
 
         # --- Checkpointing ---
-        # Keep the 3 most recent checkpoints; load the best one (by CER) at end
+        # Keep the 3 most recent checkpoints; load the best one (by CER) at end.
+        # When --nopunct_in_eval is set, use normalized CER (punctuation/case removed)
+        # for checkpoint selection instead of raw CER.
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=3,
         load_best_model_at_end=True,
-        metric_for_best_model="cer",
+        metric_for_best_model="cer_nopunct" if args.nopunct_in_eval else "cer_raw",
         greater_is_better=False,  # lower CER = better
 
         # --- Performance ---
@@ -838,12 +874,15 @@ def main():
         metrics = trainer.evaluate(
             eval_dataset=dataset, metric_key_prefix=split_name
         )
-        cer = metrics.get(f"{split_name}_cer", None)
+        cer = metrics.get(f"{split_name}_cer_raw", None)
+        cer_norm = metrics.get(f"{split_name}_cer_nopunct", None)
         loss = metrics.get(f"{split_name}_loss", None)
         if cer is not None:
-            print(f"  {split_name} CER:  {cer:.4f}")
+            print(f"  {split_name} CER (raw):     {cer:.4f}")
+        if cer_norm is not None:
+            print(f"  {split_name} CER (nopunct): {cer_norm:.4f}")
         if loss is not None:
-            print(f"  {split_name} Loss: {loss:.4f}")
+            print(f"  {split_name} Loss:           {loss:.4f}")
         return metrics
 
     val_metrics = evaluate_split(eval_dataset, "validation")
@@ -863,9 +902,13 @@ def main():
         if m is None:
             continue
         prefix = name.lower()
-        cer = m.get(f"{prefix}_cer", "N/A")
+        cer = m.get(f"{prefix}_cer_raw", "N/A")
+        cer_norm = m.get(f"{prefix}_cer_nopunct", None)
         if isinstance(cer, float):
-            print(f"  {name:12s} CER: {cer:.4f}")
+            line = f"  {name:12s} CER: {cer:.4f}"
+            if isinstance(cer_norm, float):
+                line += f"  (nopunct: {cer_norm:.4f})"
+            print(line)
         else:
             print(f"  {name:12s} CER: {cer}")
     print("=" * 60)
