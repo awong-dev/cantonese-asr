@@ -269,9 +269,20 @@ class DifferentialLRTrainer(Seq2SeqTrainer):
         "cache_position",
     }
 
-    def __init__(self, *args, encoder_lr=None, **kwargs):
+    def __init__(self, *args, encoder_lr=None, processor=None, tokenizer=None, **kwargs):
         self.encoder_lr = encoder_lr
+        self._whisper_processor = processor
+        self._whisper_tokenizer = tokenizer
         super().__init__(*args, **kwargs)
+
+    def _save(self, output_dir=None, state_dict=None):
+        """Override to also save processor and tokenizer into every checkpoint."""
+        super()._save(output_dir=output_dir, state_dict=state_dict)
+        # Save processor and tokenizer so checkpoints are self-contained
+        if output_dir and self._whisper_processor is not None:
+            self._whisper_processor.save_pretrained(output_dir)
+        if output_dir and self._whisper_tokenizer is not None:
+            self._whisper_tokenizer.save_pretrained(output_dir)
 
     def compute_loss(self, model, inputs, *args, **kwargs):
         # Strip keys Whisper doesn't accept (e.g. input_ids injected by peft)
@@ -828,12 +839,34 @@ def main():
         compute_metrics=compute_metrics,
         processing_class=processor.feature_extractor,
         encoder_lr=encoder_lr,
+        processor=processor,
+        tokenizer=tokenizer,
         callbacks=callbacks,
     )
 
     # -----------------------------------------------------------------------
     # 12. Train
     # -----------------------------------------------------------------------
+    # Register signal handlers to save model/tokenizer/processor on interrupt.
+    # This ensures checkpoints are usable even if training is killed mid-run.
+    import signal
+
+    def _signal_handler(signum, frame):
+        sig_name = signal.Signals(signum).name
+        print(f"\n{'=' * 60}")
+        print(f"Caught {sig_name} — saving emergency checkpoint...")
+        print(f"{'=' * 60}")
+        emergency_dir = os.path.join(args.output_dir, "interrupted")
+        os.makedirs(emergency_dir, exist_ok=True)
+        trainer.save_model(emergency_dir)
+        processor.save_pretrained(emergency_dir)
+        tokenizer.save_pretrained(emergency_dir)
+        print(f"Emergency checkpoint saved to {emergency_dir}")
+        raise SystemExit(1)
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGQUIT, _signal_handler)
+
     print("Starting training...")
     trainer.train(
         resume_from_checkpoint=args.resume_from_checkpoint if args.resume_from_checkpoint else None,
