@@ -15,7 +15,6 @@ Requirements:
 import argparse
 import json
 import os
-import re
 import string
 import warnings
 from dataclasses import dataclass
@@ -189,17 +188,33 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # 2. Text preprocessing
 # ---------------------------------------------------------------------------
-# Punctuation / symbols to strip from transcriptions
-CHARS_TO_REMOVE = re.compile(
-    r'[\丶\,\?\.\!\-\;\:"\"\%\'\"\�\．\⋯\！\－\：\–\。'
-    r'\》\,\）\,\？\；\～\~\…\︰\，\（\」\‧\《\﹔\、\—'
-    r'\／\,\「\﹖\·\']'
-)
+import jiwer
+
+# jiwer pipeline for text normalization: removes punctuation, lowercases,
+# and normalizes whitespace. Used both for cleaning training labels and
+# for computing normalized CER during evaluation.
+_text_normalize = jiwer.Compose([
+    jiwer.RemovePunctuation(),
+    jiwer.ToLowerCase(),
+    jiwer.RemoveWhiteSpace(replace_by_space=True),
+    jiwer.RemoveMultipleSpaces(),
+    jiwer.Strip(),
+])
+
+# CER transform adds character-level splitting on top of normalization
+_cer_transform = jiwer.Compose([
+    jiwer.RemovePunctuation(),
+    jiwer.ToLowerCase(),
+    jiwer.RemoveWhiteSpace(replace_by_space=True),
+    jiwer.RemoveMultipleSpaces(),
+    jiwer.Strip(),
+    jiwer.ReduceToListOfListOfChars(),
+])
 
 
 def clean_text(text: str) -> str:
     """Normalize transcription text for CTC training."""
-    text = CHARS_TO_REMOVE.sub("", text).lower().strip()
+    text = _text_normalize(text)
 
     # Common Voice Cantonese quirk: lone ASCII "d" is colloquial 啲
     # Only replace if "d" is the sole ASCII letter in the sentence
@@ -608,8 +623,25 @@ def main():
         pred_str = processor.batch_decode(pred_ids)
         label_str = processor.batch_decode(label_ids, group_tokens=False)
 
-        cer = cer_metric.compute(predictions=pred_str, references=label_str)
-        return {"cer": cer}
+        # Filter out empty references to avoid division by zero
+        pairs = [(p, l) for p, l in zip(pred_str, label_str) if len(l.strip()) > 0]
+        if not pairs:
+            return {"cer_raw": 1.0, "cer_nopunct": 1.0}
+        pred_list, label_list = zip(*pairs)
+        pred_list = list(pred_list)
+        label_list = list(label_list)
+
+        # Raw CER (on decoded text as-is)
+        cer_raw = cer_metric.compute(predictions=pred_list, references=label_list)
+
+        # Normalized CER (punctuation removed, lowercased, whitespace normalized)
+        cer_nopunct = jiwer.cer(
+            label_list, pred_list,
+            truth_transform=_cer_transform,
+            hypothesis_transform=_cer_transform,
+        )
+
+        return {"cer_raw": cer_raw, "cer_nopunct": cer_nopunct}
 
     # -----------------------------------------------------------------------
     # 12. Training arguments
@@ -650,7 +682,7 @@ def main():
         save_steps=args.save_steps,
         save_total_limit=3,
         load_best_model_at_end=True,
-        metric_for_best_model="cer",
+        metric_for_best_model="cer_nopunct",
         greater_is_better=False,
         # Performance
         dataloader_num_workers=4,
@@ -709,15 +741,21 @@ def main():
     print("Final evaluation (best model)")
     print("=" * 60)
 
-    val_metrics = trainer.evaluate(eval_dataset=eval_dataset, metric_key_prefix="val")
-    print(f"Validation CER: {val_metrics['val_cer']:.4f}")
+    def evaluate_split(dataset, split_name):
+        metrics = trainer.evaluate(eval_dataset=dataset, metric_key_prefix=split_name)
+        cer_raw = metrics.get(f"{split_name}_cer_raw", None)
+        cer_nopunct = metrics.get(f"{split_name}_cer_nopunct", None)
+        if cer_raw is not None:
+            print(f"  {split_name} CER (raw):     {cer_raw:.4f}")
+        if cer_nopunct is not None:
+            print(f"  {split_name} CER (nopunct): {cer_nopunct:.4f}")
+        return metrics
 
-    test_metrics = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix="test")
-    print(f"Test CER: {test_metrics['test_cer']:.4f}")
+    val_metrics = evaluate_split(eval_dataset, "validation")
+    test_metrics = evaluate_split(test_dataset, "test")
 
     if holdback_prepared is not None:
-        holdback_metrics = trainer.evaluate(eval_dataset=holdback_prepared, metric_key_prefix="holdback")
-        print(f"Holdback CER: {holdback_metrics['holdback_cer']:.4f}")
+        holdback_metrics = evaluate_split(holdback_prepared, "holdback")
 
     print("\nDone!")
 
