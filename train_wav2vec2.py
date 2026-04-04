@@ -191,14 +191,24 @@ def parse_args():
 import jiwer
 
 # jiwer pipeline for text normalization: removes punctuation, lowercases,
-# and normalizes whitespace. Used both for cleaning training labels and
-# for computing normalized CER during evaluation.
+# and normalizes whitespace. Used for cleaning training labels.
 _text_normalize = jiwer.Compose([
     jiwer.RemovePunctuation(),
     jiwer.ToLowerCase(),
     jiwer.RemoveWhiteSpace(replace_by_space=True),
     jiwer.RemoveMultipleSpaces(),
     jiwer.Strip(),
+])
+
+# CER transform adds character-level splitting on top of normalization.
+# process_characters requires transforms to produce list-of-list-of-chars.
+_cer_transform = jiwer.Compose([
+    jiwer.RemovePunctuation(),
+    jiwer.ToLowerCase(),
+    jiwer.RemoveWhiteSpace(replace_by_space=True),
+    jiwer.RemoveMultipleSpaces(),
+    jiwer.Strip(),
+    jiwer.ReduceToListOfListOfChars(),
 ])
 
 
@@ -627,8 +637,8 @@ def main():
         # Normalized CER (punctuation removed, lowercased, whitespace normalized)
         cer_nopunct_output = jiwer.process_characters(
             label_list, pred_list,
-            reference_transform=_text_normalize,
-            hypothesis_transform=_text_normalize,
+            reference_transform=_cer_transform,
+            hypothesis_transform=_cer_transform,
         )
         cer_nopunct = cer_nopunct_output.cer
 
