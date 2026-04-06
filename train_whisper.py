@@ -15,14 +15,11 @@ import argparse
 import os
 import warnings
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Union
 
-import evaluate
 import torch
 import numpy as np
 from torchcodec.decoders import AudioDecoder
-from datasets import Dataset, load_dataset
 from transformers import (
     EarlyStoppingCallback,
     Seq2SeqTrainer,
@@ -59,37 +56,36 @@ def parse_args():
         help="HuggingFace model ID",
     )
 
-    # Dataset
+    # Dataset — supports comma-separated values for multiple filesets
     parser.add_argument(
         "--dataset_path",
         type=str,
         required=True,
-        help="Path to local Common Voice dataset directory containing clips/ and TSV files",
+        help="Comma-separated paths to dataset directories (each with clips/ and TSVs)",
     )
     parser.add_argument(
         "--all_tsv",
         type=str,
         default="validated.tsv",
-        help="TSV file containing all usable samples (default: validated.tsv)",
+        help="Comma-separated TSV filenames with all usable samples (default: validated.tsv)",
     )
     parser.add_argument(
         "--holdback_tsv",
         type=str,
         default="",
-        help="TSV file of samples to exclude from the available pool (default: none). "
-             "These samples are reserved for final holdback evaluation.",
+        help="Comma-separated holdback TSV filenames to exclude (default: none)",
     )
     parser.add_argument(
         "--pct_validation",
         type=float,
         default=0.1,
-        help="Fraction of available samples for validation split (default: 0.1)",
+        help="Fraction of pooled samples for validation split (default: 0.1)",
     )
     parser.add_argument(
         "--pct_test",
         type=float,
         default=0.1,
-        help="Fraction of available samples for test split (default: 0.1)",
+        help="Fraction per fileset for test split (default: 0.1)",
     )
     parser.add_argument(
         "--write_splits", action="store_true",
@@ -361,13 +357,10 @@ def main():
     # -----------------------------------------------------------------------
     from create_splits import create_splits
 
-    local_path = Path(args.dataset_path)
-    clips_dir = str(local_path / "clips")
-
     splits = create_splits(
-        dataset_path=args.dataset_path,
-        all_tsv=args.all_tsv,
-        holdback_tsv=args.holdback_tsv,
+        dataset_paths=args.dataset_path,
+        all_tsvs=args.all_tsv,
+        holdback_tsvs=args.holdback_tsv,
         pct_validation=args.pct_validation,
         pct_test=args.pct_test,
         seed=args.seed,
@@ -376,8 +369,6 @@ def main():
 
     train_split = splits["train"]
     val_split = splits["validation"]
-    test_split = splits["test"]
-    holdback_dataset = splits["holdback"]
 
     # Optionally subsample training set
     if args.max_train_samples and args.max_train_samples < len(train_split):
@@ -389,19 +380,18 @@ def main():
     # -----------------------------------------------------------------------
     # 6. Preprocessing functions (torchcodec-based)
     # -----------------------------------------------------------------------
-    def _load_audio(path):
-        """Load an audio file and resample to 16kHz using torchcodec.
-        AudioDecoder handles resampling natively via the sample_rate parameter
-        and returns float32 samples normalized to [-1, 1]."""
+    # Each sample has a "clips_dir" column indicating where its audio lives.
+    # This supports multiple filesets with different clips/ directories.
+    def _load_audio(clips_dir, path):
+        """Load an audio file and resample to 16kHz using torchcodec."""
         filepath = os.path.join(clips_dir, path)
         decoder = AudioDecoder(filepath, sample_rate=16000, num_channels=1)
         samples = decoder.get_all_samples()
-        # samples.data is shape [1, num_samples] — squeeze to 1D numpy
         return samples.data.squeeze(0).numpy()
 
     def prepare_dataset(batch):
         """Preprocess a single sample: load audio → mel spectrogram → tokenize text."""
-        audio_np = _load_audio(batch["path"])
+        audio_np = _load_audio(batch["clips_dir"], batch["path"])
         batch["input_features"] = feature_extractor(
             audio_np, sampling_rate=16000,
         ).input_features[0]
@@ -410,7 +400,8 @@ def main():
 
     def prepare_dataset_batched(batch):
         """Batched version of prepare_dataset for faster disk-cached preprocessing."""
-        audio_arrays = [_load_audio(p) for p in batch["path"]]
+        audio_arrays = [_load_audio(cd, p)
+                        for cd, p in zip(batch["clips_dir"], batch["path"])]
         batch["input_features"] = feature_extractor(
             audio_arrays, sampling_rate=16000,
         ).input_features
@@ -420,7 +411,7 @@ def main():
         return batch
 
     train_len = len(train_split)
-    remove_cols = train_split.column_names  # ["path", "sentence"]
+    remove_cols = train_split.column_names  # ["clips_dir", "path", "sentence"]
 
     # Resolve streaming flags
     # Train: streams by default, --no_streaming or --no_streaming_train disables
@@ -472,37 +463,6 @@ def main():
             range(args.max_eval_samples)
         )
         print(f"Subsampled validation to {args.max_eval_samples} samples")
-
-    # ---- Test data (preprocessed upfront for final evaluation) ----
-    print("Preprocessing test dataset (disk cache, batched)...")
-    test_dataset = test_split.map(
-        prepare_dataset_batched,
-        remove_columns=remove_cols,
-        batched=True,
-        batch_size=16,
-    )
-    print(f"Test samples: {len(test_dataset)}")
-
-    # ---- Holdback data (preprocessed for final evaluation if provided) ----
-    holdback_eval_dataset = None
-    if holdback_dataset is not None:
-        print("Preprocessing holdback dataset (disk cache, batched)...")
-        # Clean holdback columns to match
-        hb_text_col = "sentence" if "sentence" in holdback_dataset.column_names else "text"
-        hb_keep = {"path", hb_text_col}
-        hb_remove = [c for c in holdback_dataset.column_names if c not in hb_keep]
-        if hb_remove:
-            holdback_dataset = holdback_dataset.remove_columns(hb_remove)
-        if hb_text_col != "sentence":
-            holdback_dataset = holdback_dataset.rename_column(hb_text_col, "sentence")
-
-        holdback_eval_dataset = holdback_dataset.map(
-            prepare_dataset_batched,
-            remove_columns=holdback_dataset.column_names,
-            batched=True,
-            batch_size=16,
-        )
-        print(f"Holdback samples: {len(holdback_eval_dataset)}")
 
     # -----------------------------------------------------------------------
     # 7. Load model
@@ -608,21 +568,11 @@ def main():
     # -----------------------------------------------------------------------
     # 9. Metrics — CER (Character Error Rate)
     # -----------------------------------------------------------------------
-    cer_metric = evaluate.load("cer")
+    from cer_utils import build_cer_transform, compute_cer, print_examples
 
-    # Optionally set up a jiwer normalization pipeline for computing
-    # a second CER metric with punctuation, casing, and whitespace normalized
     _cer_transform = None
     if args.nopunct_in_eval:
-        import jiwer
-        _cer_transform = jiwer.Compose([
-            jiwer.RemovePunctuation(),
-            jiwer.ToLowerCase(),
-            jiwer.RemoveWhiteSpace(replace_by_space=True),
-            jiwer.RemoveMultipleSpaces(),
-            jiwer.Strip(),
-            jiwer.ReduceToListOfListOfChars(),
-        ])
+        _cer_transform = build_cer_transform()
         print("Normalized CER enabled (RemovePunctuation + ToLowerCase + whitespace normalization)")
 
     def compute_metrics(pred):
@@ -642,34 +592,11 @@ def main():
         pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
 
-        # Filter out empty references to avoid division by zero in CER
-        pairs = [(p, l) for p, l in zip(pred_str, label_str) if len(l.strip()) > 0]
-        if not pairs:
-            return {"cer_raw": 1.0}
-        pred_str, label_str = zip(*pairs)
-        pred_list = list(pred_str)
-        label_list = list(label_str)
-
-        # Compute raw Character Error Rate
-        cer = cer_metric.compute(predictions=pred_list, references=label_list)
-        result = {"cer_raw": cer}
-
-        # Optionally compute normalized CER using jiwer pipeline
-        # (removes punctuation, lowercases, normalizes whitespace)
-        if _cer_transform is not None:
-            output = jiwer.process_characters(
-                label_list, pred_list,
-                reference_transform=_cer_transform,
-                hypothesis_transform=_cer_transform,
-            )
-            result["cer_nopunct"] = output.cer
-
-        # Log sample predictions for debugging
-        for i in range(min(5, len(pred_str))):
-            print(f"  REF: {label_str[i][:80]}")
-            print(f"  HYP: {pred_str[i][:80]}")
-            print()
-
+        # Compute CER (raw + optionally nopunct)
+        result, filtered_preds, filtered_refs = compute_cer(
+            pred_str, label_str, cer_transform=_cer_transform
+        )
+        print_examples(filtered_preds, filtered_refs, num_examples=5)
         return result
 
     # -----------------------------------------------------------------------

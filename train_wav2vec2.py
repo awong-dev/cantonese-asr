@@ -21,10 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-import evaluate
 import numpy as np
 import torch
-from datasets import DatasetDict, load_dataset
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -189,6 +187,7 @@ def parse_args():
 # 2. Text preprocessing
 # ---------------------------------------------------------------------------
 import jiwer
+from cer_utils import build_cer_transform, compute_cer, print_examples
 
 # jiwer pipeline for text normalization: removes punctuation, lowercases,
 # and normalizes whitespace. Used for cleaning training labels.
@@ -200,16 +199,8 @@ _text_normalize = jiwer.Compose([
     jiwer.Strip(),
 ])
 
-# CER transform adds character-level splitting on top of normalization.
-# process_characters requires transforms to produce list-of-list-of-chars.
-_cer_transform = jiwer.Compose([
-    jiwer.RemovePunctuation(),
-    jiwer.ToLowerCase(),
-    jiwer.RemoveWhiteSpace(replace_by_space=True),
-    jiwer.RemoveMultipleSpaces(),
-    jiwer.Strip(),
-    jiwer.ReduceToListOfListOfChars(),
-])
+# CER transform from shared module
+_cer_transform = build_cer_transform()
 
 
 def clean_text(text: str) -> str:
@@ -294,86 +285,28 @@ def main():
         print(f"VRAM: {gpu_mem:.1f} GB")
 
     # -----------------------------------------------------------------------
-    # 6. Load dataset
+    # 6. Load dataset and create splits
     # -----------------------------------------------------------------------
-    print(f"Loading dataset from local path: {args.dataset_path}")
-    local_path = Path(args.dataset_path)
-    _local_clips_dir = str(local_path / "clips")
+    from create_splits import create_splits
 
-    # Load all usable samples and optionally exclude holdback
-    all_tsv = local_path / args.all_tsv
-
-    if not all_tsv.exists():
-        raise FileNotFoundError(f"all_tsv not found: {all_tsv}")
-
-    all_dataset = load_dataset(
-        "csv", data_files=str(all_tsv), delimiter="\t", split="train",
+    splits = create_splits(
+        dataset_paths=args.dataset_path,
+        all_tsvs=args.all_tsv,
+        holdback_tsvs=args.holdback_tsv,
+        pct_validation=args.pct_validation,
+        pct_test=args.pct_test,
+        seed=args.seed,
+        write_splits=args.write_splits,
     )
-    print(f"All samples: {len(all_dataset)}")
 
-    if args.holdback_tsv:
-        holdback_tsv = local_path / args.holdback_tsv
-        if not holdback_tsv.exists():
-            raise FileNotFoundError(f"holdback_tsv not found: {holdback_tsv}")
-        holdback_dataset = load_dataset(
-            "csv", data_files=str(holdback_tsv), delimiter="\t", split="train",
-        )
-        holdback_paths = set(holdback_dataset["path"])
-        available_dataset = all_dataset.filter(
-            lambda x: x["path"] not in holdback_paths
-        )
-        print(f"Holdback samples: {len(holdback_dataset)}")
-    else:
-        holdback_dataset = None
-        available_dataset = all_dataset
-
-    print(f"Available samples: {len(available_dataset)}")
-
-    # Detect text column
-    text_col = "sentence" if "sentence" in available_dataset.column_names else "text"
-
-    # Remove unnecessary columns — keep path + text
-    keep_cols = {"path", text_col}
-    cols_to_remove = [
-        c for c in available_dataset.column_names if c not in keep_cols
-    ]
-    if cols_to_remove:
-        available_dataset = available_dataset.remove_columns(cols_to_remove)
-
-    # Normalize column names
-    if text_col != "sentence":
-        available_dataset = available_dataset.rename_column(text_col, "sentence")
-
-    # Split available_dataset into train / validation / test
-    assert args.pct_validation + args.pct_test < 1.0, (
-        "pct_validation + pct_test must be less than 1.0"
-    )
-    available_dataset = available_dataset.shuffle(seed=args.seed)
-    n_available = len(available_dataset)
-    n_validation = int(n_available * args.pct_validation)
-    n_test = int(n_available * args.pct_test)
-    n_train = n_available - n_validation - n_test
-
-    common_voice = DatasetDict({
-        "train": available_dataset.select(range(n_train)),
-        "validation": available_dataset.select(range(n_train, n_train + n_validation)),
-        "test": available_dataset.select(range(n_train + n_validation, n_available)),
-    })
-
-    print(f"Train samples: {len(common_voice['train'])}")
-    print(f"Validation samples: {len(common_voice['validation'])}")
-    print(f"Test samples: {len(common_voice['test'])}")
-
-    # Optionally write split files
-    if args.write_splits:
-        for split_name in ("train", "validation", "test"):
-            out_path = f"{split_name}_split.tsv"
-            common_voice[split_name].to_csv(out_path, sep="\t", index=False)
-            print(f"Wrote {out_path} ({len(common_voice[split_name])} samples)")
+    train_split = splits["train"]
+    val_split = splits["validation"]
+    test_splits = splits["test_splits"]
+    holdback_splits = splits["holdback_splits"]
 
     # Optionally subsample training set
-    if args.max_train_samples and args.max_train_samples < len(common_voice["train"]):
-        common_voice["train"] = common_voice["train"].shuffle(seed=args.seed).select(
+    if args.max_train_samples and args.max_train_samples < len(train_split):
+        train_split = train_split.shuffle(seed=args.seed).select(
             range(args.max_train_samples)
         )
         print(f"Subsampled to {args.max_train_samples} train samples")
@@ -387,18 +320,27 @@ def main():
         batch["sentence"] = clean_text(batch["sentence"])
         return batch
 
-    common_voice = common_voice.map(apply_text_cleaning)
+    train_split = train_split.map(apply_text_cleaning)
+    val_split = val_split.map(apply_text_cleaning)
+    test_splits = [ts.map(apply_text_cleaning) for ts in test_splits]
 
-    if holdback_dataset is not None:
-        # Clean holdback text and keep only path + sentence
-        text_col_hb = "sentence" if "sentence" in holdback_dataset.column_names else "text"
-        keep_cols_hb = {"path", text_col_hb}
-        cols_remove_hb = [c for c in holdback_dataset.column_names if c not in keep_cols_hb]
-        if cols_remove_hb:
-            holdback_dataset = holdback_dataset.remove_columns(cols_remove_hb)
-        if text_col_hb != "sentence":
-            holdback_dataset = holdback_dataset.rename_column(text_col_hb, "sentence")
-        holdback_dataset = holdback_dataset.map(apply_text_cleaning)
+    # Clean holdback text columns
+    cleaned_holdbacks = []
+    for hb in holdback_splits:
+        if hb is not None:
+            # Normalize columns: keep path, sentence, clips_dir
+            hb_text_col = "sentence" if "sentence" in hb.column_names else "text"
+            hb_keep = {"path", hb_text_col, "clips_dir"}
+            hb_remove = [c for c in hb.column_names if c not in hb_keep]
+            if hb_remove:
+                hb = hb.remove_columns(hb_remove)
+            if hb_text_col != "sentence":
+                hb = hb.rename_column(hb_text_col, "sentence")
+            hb = hb.map(apply_text_cleaning)
+            cleaned_holdbacks.append(hb)
+        else:
+            cleaned_holdbacks.append(None)
+    holdback_splits = cleaned_holdbacks
 
     # -----------------------------------------------------------------------
     # 7b. Vocabulary + processor
@@ -416,7 +358,7 @@ def main():
         processor.save_pretrained(args.output_dir)
         print(f"Vocabulary size: {len(processor.tokenizer)} (reused from checkpoint)")
     else:
-        # Build character vocabulary from train + validation + test
+        # Build character vocabulary from train + validation + all test splits
         print("Building vocabulary...")
 
         def extract_chars(batch):
@@ -424,12 +366,12 @@ def main():
             return {"vocab": [list(set(all_text))]}
 
         all_chars = set()
-        for split_name in ("train", "validation", "test"):
-            vocab_split = common_voice[split_name].map(
+        for ds in [train_split, val_split] + test_splits:
+            vocab_ds = ds.map(
                 extract_chars, batched=True, batch_size=1000,
-                remove_columns=common_voice[split_name].column_names,
+                remove_columns=ds.column_names,
             )
-            for row in vocab_split:
+            for row in vocab_ds:
                 all_chars.update(row["vocab"])
 
         # Remove ASCII characters (map to [UNK]), keep space for word delimiter
@@ -465,18 +407,18 @@ def main():
     # -----------------------------------------------------------------------
     # 9. Audio loading + feature extraction
     # -----------------------------------------------------------------------
-    train_len = len(common_voice["train"])
+    train_len = len(train_split)
 
     from torchcodec.decoders import AudioDecoder
 
-    def _load_audio(path):
-        filepath = os.path.join(_local_clips_dir, path)
+    def _load_audio(clips_dir, path):
+        filepath = os.path.join(clips_dir, path)
         decoder = AudioDecoder(filepath, sample_rate=16000, num_channels=1)
         samples = decoder.get_all_samples()
         return samples.data.squeeze().numpy()
 
     def prepare_fn(batch):
-        audio_np = _load_audio(batch["path"])
+        audio_np = _load_audio(batch["clips_dir"], batch["path"])
         batch["input_values"] = processor(
             audio_np, sampling_rate=16000,
         ).input_values[0]
@@ -487,7 +429,8 @@ def main():
         return batch
 
     def prepare_fn_batched(batch):
-        audio_arrays = [_load_audio(p) for p in batch["path"]]
+        audio_arrays = [_load_audio(cd, p)
+                        for cd, p in zip(batch["clips_dir"], batch["path"])]
         batch["input_values"] = processor(
             audio_arrays, sampling_rate=16000,
             padding=False,
@@ -498,9 +441,7 @@ def main():
         batch["input_length"] = [len(a) for a in audio_arrays]
         return batch
 
-    remove_cols_train = common_voice.column_names["train"]
-    remove_cols_val = common_voice.column_names["validation"]
-    remove_cols_test = common_voice.column_names["test"]
+    remove_cols = train_split.column_names  # ["clips_dir", "path", "sentence"]
 
     stream_train = not args.no_streaming
     cache_eval = not args.streaming_eval
@@ -508,9 +449,9 @@ def main():
     if not stream_train:
         # ---- Disk cache mode: preprocess everything upfront (batched) ----
         print("Preprocessing training dataset (disk cache, batched)...")
-        train_dataset = common_voice["train"].map(
+        train_dataset = train_split.map(
             prepare_fn_batched,
-            remove_columns=remove_cols_train,
+            remove_columns=remove_cols,
             batched=True,
             batch_size=16,
         )
@@ -520,53 +461,62 @@ def main():
         # ---- Streaming mode: process on-the-fly, no disk cache ----
         print("Setting up streaming training dataset...")
         train_dataset = (
-            common_voice["train"]
+            train_split
             .to_iterable_dataset(num_shards=max(1, train_len // 5000))
-            .map(prepare_fn, remove_columns=remove_cols_train)
+            .map(prepare_fn, remove_columns=remove_cols)
         )
         print(f"Train samples (approx): {train_len}")
 
     if cache_eval:
         print("Preprocessing validation dataset (disk cache, batched)...")
-        eval_dataset = common_voice["validation"].map(
+        eval_dataset = val_split.map(
             prepare_fn_batched,
-            remove_columns=remove_cols_val,
+            remove_columns=remove_cols,
             batched=True,
             batch_size=16,
         )
         print(f"Validation samples: {len(eval_dataset)}")
     else:
         print("Preprocessing validation dataset...")
-        eval_dataset = common_voice["validation"].map(
+        eval_dataset = val_split.map(
             prepare_fn,
-            remove_columns=remove_cols_val,
+            remove_columns=remove_cols,
             keep_in_memory=True,
         )
         print(f"Validation samples: {len(eval_dataset)}")
 
-    # Preprocess test dataset (always cached, used for final evaluation)
-    print("Preprocessing test dataset (disk cache, batched)...")
-    test_dataset = common_voice["test"].map(
-        prepare_fn_batched,
-        remove_columns=remove_cols_test,
-        batched=True,
-        batch_size=16,
-    )
-    print(f"Test samples: {len(test_dataset)}")
-
-    # Preprocess holdback dataset if present (for final evaluation only)
-    if holdback_dataset is not None:
-        print("Preprocessing holdback dataset (disk cache, batched)...")
-        remove_cols_holdback = holdback_dataset.column_names
-        holdback_prepared = holdback_dataset.map(
+    # Preprocess test datasets (always cached, used for final evaluation)
+    test_prepared = []
+    for i, ts in enumerate(test_splits):
+        name = splits["fileset_names"][i]
+        print(f"Preprocessing test dataset [{name}] (disk cache, batched)...")
+        ts_remove = ts.column_names
+        ts_prep = ts.map(
             prepare_fn_batched,
-            remove_columns=remove_cols_holdback,
+            remove_columns=ts_remove,
             batched=True,
             batch_size=16,
         )
-        print(f"Holdback samples: {len(holdback_prepared)}")
-    else:
-        holdback_prepared = None
+        print(f"  Test [{name}] samples: {len(ts_prep)}")
+        test_prepared.append((name, ts_prep))
+
+    # Preprocess holdback datasets if present (for final evaluation only)
+    holdback_prepared = []
+    for i, hb in enumerate(holdback_splits):
+        if hb is not None:
+            name = splits["fileset_names"][i]
+            print(f"Preprocessing holdback dataset [{name}] (disk cache, batched)...")
+            hb_remove = hb.column_names
+            hb_prep = hb.map(
+                prepare_fn_batched,
+                remove_columns=hb_remove,
+                batched=True,
+                batch_size=16,
+            )
+            print(f"  Holdback [{name}] samples: {len(hb_prep)}")
+            holdback_prepared.append((name, hb_prep))
+        else:
+            holdback_prepared.append(None)
 
     # Subsample number of eval.
     if args.max_eval_samples and args.max_eval_samples < len(eval_dataset):
@@ -610,8 +560,6 @@ def main():
     # -----------------------------------------------------------------------
     # 11. Metrics
     # -----------------------------------------------------------------------
-    cer_metric = evaluate.load("cer")
-
     def compute_metrics(pred):
         pred_logits = pred.predictions
         pred_ids = np.argmax(pred_logits, axis=-1)
@@ -623,26 +571,12 @@ def main():
         pred_str = processor.batch_decode(pred_ids)
         label_str = processor.batch_decode(label_ids, group_tokens=False)
 
-        # Filter out empty references to avoid division by zero
-        pairs = [(p, l) for p, l in zip(pred_str, label_str) if len(l.strip()) > 0]
-        if not pairs:
-            return {"cer_raw": 1.0, "cer_nopunct": 1.0}
-        pred_list, label_list = zip(*pairs)
-        pred_list = list(pred_list)
-        label_list = list(label_list)
-
-        # Raw CER (on decoded text as-is)
-        cer_raw = cer_metric.compute(predictions=pred_list, references=label_list)
-
-        # Normalized CER (punctuation removed, lowercased, whitespace normalized)
-        cer_nopunct_output = jiwer.process_characters(
-            label_list, pred_list,
-            reference_transform=_cer_transform,
-            hypothesis_transform=_cer_transform,
+        # Compute CER (raw + nopunct) via shared utility
+        result, filtered_preds, filtered_refs = compute_cer(
+            pred_str, label_str, cer_transform=_cer_transform
         )
-        cer_nopunct = cer_nopunct_output.cer
-
-        return {"cer_raw": cer_raw, "cer_nopunct": cer_nopunct}
+        print_examples(filtered_preds, filtered_refs, num_examples=5)
+        return result
 
     # -----------------------------------------------------------------------
     # 12. Training arguments
@@ -736,7 +670,7 @@ def main():
     processor.save_pretrained(final_dir)
 
     # -----------------------------------------------------------------------
-    # 16. Final evaluation on validation and test splits
+    # 16. Final evaluation on all splits
     # -----------------------------------------------------------------------
     print("\n" + "=" * 60)
     print("Final evaluation (best model)")
@@ -756,27 +690,38 @@ def main():
             print(f"  {split_name} evaluation failed: {e}")
             return None
 
-    val_metrics = evaluate_split(eval_dataset, "validation")
-    test_metrics = evaluate_split(test_dataset, "test")
+    all_results = {}
 
-    holdback_metrics = None
-    if holdback_prepared is not None:
-        holdback_metrics = evaluate_split(holdback_prepared, "holdback")
+    # Validation
+    val_metrics = evaluate_split(eval_dataset, "validation")
+    if val_metrics:
+        all_results["validation"] = val_metrics
+
+    # Per-fileset test splits
+    for name, ts_prep in test_prepared:
+        label = f"test_{name}"
+        m = evaluate_split(ts_prep, label)
+        if m:
+            all_results[label] = m
+
+    # Per-fileset holdback splits
+    for item in holdback_prepared:
+        if item is not None:
+            name, hb_prep = item
+            label = f"holdback_{name}"
+            m = evaluate_split(hb_prep, label)
+            if m:
+                all_results[label] = m
 
     # ---- Summary ----
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    for name, m in [("Validation", val_metrics),
-                    ("Test", test_metrics),
-                    ("Holdback", holdback_metrics)]:
-        if m is None:
-            continue
-        prefix = name.lower()
-        cer_raw = m.get(f"{prefix}_cer_raw", None)
-        cer_nopunct = m.get(f"{prefix}_cer_nopunct", None)
+    for name, m in all_results.items():
+        cer_raw = m.get(f"{name}_cer_raw", None)
+        cer_nopunct = m.get(f"{name}_cer_nopunct", None)
         if cer_raw is not None:
-            line = f"  {name:12s} CER (raw): {cer_raw:.4f}"
+            line = f"  {name:24s} CER (raw): {cer_raw:.4f}"
             if cer_nopunct is not None:
                 line += f"  (nopunct: {cer_nopunct:.4f})"
             print(line)

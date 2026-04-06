@@ -2,27 +2,26 @@
 """
 Evaluate a fine-tuned Whisper model on test and/or holdback splits.
 
-Two modes:
-  1. Explicit TSV: pass --test_tsv and/or --holdback_tsv directly
-  2. Regenerate splits: pass --all_tsv, --pct_test, --seed (and optionally
-     --holdback_tsv, --pct_validation) to regenerate the same splits used
-     during training without needing the training script.
+Supports multiple filesets: evaluates each test split separately, then
+computes a combined CER across all test samples.
 
 Usage:
-    # Mode 1: explicit TSV files
-    python eval_whisper.py --model ./whisper-large-v3-yue/final \
-        --dataset_path cv-corpus-25.0-2026-03-09/yue \
-        --test_tsv test_split.tsv --nopunct_in_eval
+    # Single fileset, explicit TSV
+    python eval_whisper.py --model ./whisper-yue/final \
+        --dataset_path cv-corpus/yue --test_tsv test_split.tsv
 
-    # Mode 2: regenerate splits from seed (same params as training)
-    python eval_whisper.py --model ./whisper-large-v3-yue/final \
-        --dataset_path cv-corpus-25.0-2026-03-09/yue \
-        --all_tsv validated.tsv --holdback_tsv test.tsv \
-        --pct_validation 0.005 --pct_test 0.05 --seed 42 \
-        --eval_test --eval_holdback --nopunct_in_eval
+    # Single fileset, regenerate splits from seed
+    python eval_whisper.py --model ./whisper-yue/final \
+        --dataset_path cv-corpus/yue --all_tsv validated.tsv \
+        --holdback_tsv test.tsv --pct_test 0.05 --seed 42 \
+        --eval_test --eval_holdback
 
-Requirements:
-    pip install transformers datasets evaluate jiwer torchcodec
+    # Multiple filesets, regenerate splits
+    python eval_whisper.py --model ./whisper-yue/final \
+        --dataset_path cv-corpus/yue,cv-corpus/zh-CN \
+        --all_tsv validated.tsv,validated.tsv \
+        --holdback_tsv test.tsv,test.tsv \
+        --pct_test 0.05 --seed 42 --eval_test --eval_holdback
 """
 
 import argparse
@@ -32,11 +31,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
-import evaluate
 import torch
 import numpy as np
 from torchcodec.decoders import AudioDecoder
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
@@ -46,20 +44,12 @@ from transformers import (
     WhisperTokenizer,
 )
 
-# Suppress noisy warnings
-warnings.filterwarnings(
-    "ignore", message="None of the inputs have requires_grad=True"
-)
-warnings.filterwarnings(
-    "ignore", message=".*using a WhisperTokenizerFast.*"
-)
+warnings.filterwarnings("ignore", message="None of the inputs have requires_grad=True")
+warnings.filterwarnings("ignore", message=".*using a WhisperTokenizerFast.*")
 import logging
 logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
 
 
-# ---------------------------------------------------------------------------
-# Data collator (same as in train_whisper.py)
-# ---------------------------------------------------------------------------
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
     processor: Any
@@ -68,11 +58,8 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     def __call__(
         self, features: List[Dict[str, Union[List[int], torch.Tensor]]]
     ) -> Dict[str, torch.Tensor]:
-        input_features = [
-            {"input_features": f["input_features"]} for f in features
-        ]
+        input_features = [{"input_features": f["input_features"]} for f in features]
         label_features = [f["labels"] for f in features]
-
         batch = self.processor.feature_extractor.pad(
             input_features, return_tensors="pt", return_attention_mask=True
         )
@@ -84,14 +71,10 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         )
         if (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
             labels = labels[:, 1:]
-
         batch["labels"] = labels
         return batch
 
 
-# ---------------------------------------------------------------------------
-# Core evaluation function
-# ---------------------------------------------------------------------------
 def run_evaluation(
     model_path,
     dataset_path,
@@ -115,60 +98,72 @@ def run_evaluation(
     """
     Evaluate a Whisper model on test and/or holdback splits.
 
-    Supports two modes:
-      - Explicit TSV: pass test_tsv and/or holdback_tsv file paths
-      - Regenerate: pass all_tsv + seed + pct params + eval_test/eval_holdback
-        flags, and splits are regenerated deterministically via create_splits
+    Supports multiple filesets via comma-separated dataset_path values.
+    When multiple test splits exist, evaluates each separately and
+    computes a combined CER across all samples.
 
     Returns:
-        dict with keys "test" and/or "holdback", each containing metrics dict
+        dict with per-split metrics and optionally "combined" metrics
     """
-    local_path = Path(dataset_path)
-    clips_dir = str(local_path / "clips")
-
-    # ---- Determine which datasets to evaluate ----
-    test_ds_raw = None
-    holdback_ds_raw = None
+    # ---- Resolve datasets to evaluate ----
+    test_datasets = []     # list of (name, Dataset)
+    holdback_datasets = [] # list of (name, Dataset)
 
     if seed is not None and all_tsv is not None:
         # Mode 2: regenerate splits from seed
         from create_splits import create_splits
         splits = create_splits(
-            dataset_path=dataset_path,
-            all_tsv=all_tsv,
-            holdback_tsv=holdback_tsv or "",
+            dataset_paths=dataset_path,
+            all_tsvs=all_tsv,
+            holdback_tsvs=holdback_tsv or "",
             pct_validation=pct_validation,
             pct_test=pct_test,
             seed=seed,
         )
         if eval_test:
-            test_ds_raw = splits["test"]
-        if eval_holdback and splits["holdback"] is not None:
-            holdback_ds_raw = splits["holdback"]
+            for ts, name in zip(splits["test_splits"], splits["fileset_names"]):
+                test_datasets.append((f"test_{name}", ts))
+        if eval_holdback:
+            for hb, name in zip(splits["holdback_splits"], splits["fileset_names"]):
+                if hb is not None:
+                    holdback_datasets.append((f"holdback_{name}", hb))
     else:
         # Mode 1: explicit TSV paths
-        if test_tsv:
-            p = Path(test_tsv)
-            if not p.is_absolute():
-                p = local_path / p
-            assert p.exists(), f"Test TSV not found: {p}"
-            test_ds_raw = load_dataset(
-                "csv", data_files=str(p), delimiter="\t", split="train"
-            )
-        if holdback_tsv:
-            p = Path(holdback_tsv)
-            if not p.is_absolute():
-                p = local_path / p
-            assert p.exists(), f"Holdback TSV not found: {p}"
-            holdback_ds_raw = load_dataset(
-                "csv", data_files=str(p), delimiter="\t", split="train"
-            )
+        # dataset_path may be comma-separated for audio resolution
+        ds_paths = [p.strip() for p in dataset_path.split(",")] \
+            if isinstance(dataset_path, str) else dataset_path
+        primary_path = Path(ds_paths[0])
 
-    assert test_ds_raw is not None or holdback_ds_raw is not None, \
+        if test_tsv:
+            tsvs = [t.strip() for t in test_tsv.split(",")]
+            for j, tsv in enumerate(tsvs):
+                p = Path(tsv)
+                if not p.is_absolute():
+                    dp = Path(ds_paths[j]) if j < len(ds_paths) else primary_path
+                    p = dp / p
+                assert p.exists(), f"Test TSV not found: {p}"
+                ds = load_dataset("csv", data_files=str(p), delimiter="\t", split="train")
+                label = Path(ds_paths[j]).name if j < len(ds_paths) else f"set{j}"
+                test_datasets.append((f"test_{label}", ds))
+
+        if holdback_tsv and eval_holdback:
+            tsvs = [t.strip() for t in holdback_tsv.split(",")]
+            for j, tsv in enumerate(tsvs):
+                p = Path(tsv)
+                if not p.is_absolute():
+                    dp = Path(ds_paths[j]) if j < len(ds_paths) else primary_path
+                    p = dp / p
+                assert p.exists(), f"Holdback TSV not found: {p}"
+                ds = load_dataset("csv", data_files=str(p), delimiter="\t", split="train")
+                label = Path(ds_paths[j]).name if j < len(ds_paths) else f"set{j}"
+                holdback_datasets.append((f"holdback_{label}", ds))
+
+    all_eval = test_datasets + holdback_datasets
+    assert len(all_eval) > 0, \
         "No datasets to evaluate. Provide --test_tsv/--holdback_tsv, " \
         "or use --seed with --all_tsv and --eval_test/--eval_holdback."
 
-    # ---- Load processor, tokenizer, model ----
+    # ---- Load model ----
     print(f"Loading model from: {model_path}")
     feature_extractor = WhisperFeatureExtractor.from_pretrained(model_path)
     tokenizer = WhisperTokenizer.from_pretrained(
@@ -180,28 +175,38 @@ def run_evaluation(
     model = WhisperForConditionalGeneration.from_pretrained(model_path)
     model.eval()
 
-    # ---- Audio loading ----
-    def _load_audio(path):
+    # ---- Audio loading (uses clips_dir column if present, else infers) ----
+    ds_paths = [p.strip() for p in dataset_path.split(",")] \
+        if isinstance(dataset_path, str) else dataset_path
+    default_clips_dir = str(Path(ds_paths[0]) / "clips")
+
+    def _load_audio(clips_dir, path):
         filepath = os.path.join(clips_dir, path)
         decoder = AudioDecoder(filepath, sample_rate=16000, num_channels=1)
         samples = decoder.get_all_samples()
         return samples.data.squeeze(0).numpy()
 
     def prepare_dataset_batched(batch):
-        audio_arrays = [_load_audio(p) for p in batch["path"]]
+        clips_dirs = batch.get("clips_dir", [default_clips_dir] * len(batch["path"]))
+        audio_arrays = [_load_audio(cd, p) for cd, p in zip(clips_dirs, batch["path"])]
         batch["input_features"] = feature_extractor(
             audio_arrays, sampling_rate=16000,
         ).input_features
-        batch["labels"] = [
-            tokenizer(s).input_ids for s in batch["sentence"]
-        ]
+        batch["labels"] = [tokenizer(s).input_ids for s in batch["sentence"]]
         return batch
 
-    # ---- Preprocess a dataset: normalize columns → extract features ----
     def preprocess(ds, name):
+        """Normalize columns and extract features."""
         text_col = "sentence" if "sentence" in ds.column_names else "text"
-        keep_cols = {"path", text_col}
-        cols_to_remove = [c for c in ds.column_names if c not in keep_cols]
+        # Determine which columns to keep
+        keep = {"path", text_col}
+        if "clips_dir" in ds.column_names:
+            keep.add("clips_dir")
+        else:
+            # Infer clips_dir from default
+            ds = ds.map(lambda x: {"clips_dir": default_clips_dir}, batched=False)
+            keep.add("clips_dir")
+        cols_to_remove = [c for c in ds.column_names if c not in keep]
         if cols_to_remove:
             ds = ds.remove_columns(cols_to_remove)
         if text_col != "sentence":
@@ -209,80 +214,51 @@ def run_evaluation(
 
         remove_cols = ds.column_names
         print(f"Preprocessing {name} ({len(ds)} samples)...")
-        ds = ds.map(
-            prepare_dataset_batched,
-            remove_columns=remove_cols,
-            batched=True,
-            batch_size=16,
-        )
+        ds = ds.map(prepare_dataset_batched, remove_columns=remove_cols,
+                     batched=True, batch_size=16)
         print(f"  Ready: {len(ds)} samples")
         return ds
 
-    # ---- Preprocess datasets ----
-    test_dataset = preprocess(test_ds_raw, "test") if test_ds_raw is not None else None
-    holdback_dataset = preprocess(holdback_ds_raw, "holdback") if holdback_ds_raw is not None else None
+    # ---- Preprocess all datasets ----
+    processed = []
+    for name, ds in all_eval:
+        processed.append((name, preprocess(ds, name)))
 
     # ---- Metrics ----
-    cer_metric = evaluate.load("cer")
+    from cer_utils import build_cer_transform, compute_cer, print_examples
 
-    _cer_transform = None
-    if nopunct_in_eval:
-        import jiwer
-        _cer_transform = jiwer.Compose([
-            jiwer.RemovePunctuation(),
-            jiwer.ToLowerCase(),
-            jiwer.RemoveWhiteSpace(replace_by_space=True),
-            jiwer.RemoveMultipleSpaces(),
-            jiwer.Strip(),
-            jiwer.ReduceToListOfListOfChars(),
-        ])
+    _cer_transform = build_cer_transform() if nopunct_in_eval else None
+
+    # Store all predictions/references for combined CER
+    all_preds = []
+    all_refs = []
 
     def compute_metrics(pred):
         pred_ids = pred.predictions
         label_ids = pred.label_ids
-
         if isinstance(pred_ids, tuple):
             pred_ids = pred_ids[0]
-
         label_ids = np.where(label_ids == -100, tokenizer.pad_token_id, label_ids)
         pred_ids = np.where(pred_ids == -100, tokenizer.pad_token_id, pred_ids)
-
         pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
 
-        pairs = [(p, l) for p, l in zip(pred_str, label_str) if len(l.strip()) > 0]
-        if not pairs:
-            return {"cer_raw": 1.0}
-        pred_str, label_str = zip(*pairs)
-        pred_list = list(pred_str)
-        label_list = list(label_str)
+        result, filtered_preds, filtered_refs = compute_cer(
+            pred_str, label_str, cer_transform=_cer_transform
+        )
 
-        cer = cer_metric.compute(predictions=pred_list, references=label_list)
-        result = {"cer_raw": cer}
+        # Accumulate for combined CER
+        all_preds.extend(filtered_preds)
+        all_refs.extend(filtered_refs)
 
-        if _cer_transform is not None:
-            import jiwer
-            output = jiwer.process_characters(
-                label_list, pred_list,
-                reference_transform=_cer_transform,
-                hypothesis_transform=_cer_transform,
-            )
-            result["cer_nopunct"] = output.cer
-
-        for i in range(min(num_examples, len(pred_str))):
-            print(f"  REF: {label_str[i][:80]}")
-            print(f"  HYP: {pred_str[i][:80]}")
-            print()
-
+        print_examples(filtered_preds, filtered_refs, num_examples=num_examples)
         return result
 
-    # ---- Data collator ----
+    # ---- Trainer for evaluation ----
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(
         processor=processor,
         decoder_start_token_id=model.config.decoder_start_token_id,
     )
-
-    # ---- Trainer (used only for evaluation) ----
     eval_args = Seq2SeqTrainingArguments(
         output_dir="/tmp/whisper-eval",
         per_device_eval_batch_size=eval_batch_size,
@@ -297,7 +273,6 @@ def run_evaluation(
         label_names=["labels"],
         report_to=[],
     )
-
     trainer = Seq2SeqTrainer(
         model=model,
         args=eval_args,
@@ -309,9 +284,7 @@ def run_evaluation(
     # ---- Run evaluations ----
     def evaluate_split(dataset, split_name):
         print(f"\nEvaluating on {split_name} ({len(dataset)} samples)...")
-        metrics = trainer.evaluate(
-            eval_dataset=dataset, metric_key_prefix=split_name
-        )
+        metrics = trainer.evaluate(eval_dataset=dataset, metric_key_prefix=split_name)
         cer = metrics.get(f"{split_name}_cer_raw", None)
         cer_norm = metrics.get(f"{split_name}_cer_nopunct", None)
         loss = metrics.get(f"{split_name}_loss", None)
@@ -324,105 +297,88 @@ def run_evaluation(
         return metrics
 
     results = {}
-
     print("\n" + "=" * 60)
     print("EVALUATION")
     print("=" * 60)
 
-    if test_dataset is not None:
-        results["test"] = evaluate_split(test_dataset, "test")
+    for name, ds in processed:
+        results[name] = evaluate_split(ds, name)
 
-    if holdback_dataset is not None:
-        results["holdback"] = evaluate_split(holdback_dataset, "holdback")
+    # ---- Combined CER (if multiple test splits) ----
+    test_results = {k: v for k, v in results.items() if k.startswith("test_")}
+    if len(test_results) > 1 and len(all_preds) > 0:
+        combined, _, _ = compute_cer(
+            all_preds, all_refs, cer_transform=_cer_transform
+        )
+        results["combined"] = {
+            "combined_cer_raw": combined["cer_raw"],
+        }
+        if "cer_nopunct" in combined:
+            results["combined"]["combined_cer_nopunct"] = combined["cer_nopunct"]
 
     # ---- Summary ----
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    for name, prefix in [("Test", "test"), ("Holdback", "holdback")]:
-        m = results.get(prefix)
-        if m is None:
-            continue
-        cer = m.get(f"{prefix}_cer_raw", "N/A")
+    for name, m in results.items():
+        prefix = name
+        cer = m.get(f"{prefix}_cer_raw", None)
         cer_norm = m.get(f"{prefix}_cer_nopunct", None)
-        if isinstance(cer, float):
-            line = f"  {name:12s} CER: {cer:.4f}"
-            if isinstance(cer_norm, float):
+        if cer is not None:
+            line = f"  {name:24s} CER: {cer:.4f}"
+            if cer_norm is not None:
                 line += f"  (nopunct: {cer_norm:.4f})"
             print(line)
-        else:
-            print(f"  {name:12s} CER: {cer}")
     print("=" * 60)
 
     return results
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
         description="Evaluate a fine-tuned Whisper model on test/holdback splits"
     )
-    parser.add_argument(
-        "--model", type=str, required=True,
-        help="Path to model directory (must contain model + tokenizer/processor)",
-    )
+    parser.add_argument("--model", type=str, required=True)
     parser.add_argument(
         "--dataset_path", type=str, required=True,
-        help="Path to Common Voice dataset directory (with clips/)",
+        help="Comma-separated paths to dataset directories (with clips/)",
     )
 
-    # Mode 1: explicit TSV paths
+    # Mode 1: explicit TSV
     parser.add_argument(
         "--test_tsv", type=str, default=None,
-        help="Path to test split TSV (relative to dataset_path, or absolute)",
+        help="Comma-separated test TSV paths",
     )
 
-    # Mode 2: regenerate splits from seed
-    parser.add_argument(
-        "--all_tsv", type=str, default=None,
-        help="TSV file with all usable samples (for regenerating splits)",
-    )
+    # Mode 2: regenerate splits
+    parser.add_argument("--all_tsv", type=str, default=None,
+                        help="Comma-separated TSV filenames for regenerating splits")
     parser.add_argument("--pct_validation", type=float, default=0.1)
     parser.add_argument("--pct_test", type=float, default=0.1)
-    parser.add_argument(
-        "--seed", type=int, default=None,
-        help="Random seed for regenerating splits (must match training seed)",
-    )
-    parser.add_argument(
-        "--eval_test", action="store_true",
-        help="Evaluate on the test split (when regenerating splits)",
-    )
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--eval_test", action="store_true")
 
     # Shared
-    parser.add_argument(
-        "--holdback_tsv", type=str, default=None,
-        help="Path to holdback TSV (relative to dataset_path, or absolute). "
-             "Used in both modes.",
-    )
-    parser.add_argument(
-        "--eval_holdback", action="store_true",
-        help="Evaluate on the holdback split",
-    )
+    parser.add_argument("--holdback_tsv", type=str, default=None,
+                        help="Comma-separated holdback TSV paths")
+    parser.add_argument("--eval_holdback", action="store_true")
     parser.add_argument("--language_full", type=str, default="cantonese")
     parser.add_argument("--eval_batch_size", type=int, default=32)
     parser.add_argument("--eval_accumulation_steps", type=int, default=32)
-    parser.add_argument(
-        "--nopunct_in_eval", action="store_true",
-        help="Also compute CER with punctuation removed",
-    )
+    parser.add_argument("--nopunct_in_eval", action="store_true")
     parser.add_argument("--num_examples", type=int, default=5)
     args = parser.parse_args()
 
-    # Validate: must have something to evaluate
     has_explicit = args.test_tsv is not None
     has_regenerate = args.seed is not None and args.all_tsv is not None
     has_holdback = args.holdback_tsv is not None and args.eval_holdback
 
     assert has_explicit or (has_regenerate and args.eval_test) or has_holdback, \
-        "Nothing to evaluate. Provide --test_tsv, or use --seed + --all_tsv + --eval_test, " \
-        "or use --holdback_tsv + --eval_holdback."
+        "Nothing to evaluate. Provide --test_tsv, or --seed + --all_tsv + --eval_test, " \
+        "or --holdback_tsv + --eval_holdback."
 
     run_evaluation(
         model_path=args.model,

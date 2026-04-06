@@ -1,33 +1,42 @@
 #!/usr/bin/env python3
 """
-Create deterministic train/validation/test splits from a Common Voice dataset.
+Create deterministic train/validation/test splits from one or more Common Voice
+dataset filesets.
 
-Shared by train_whisper.py and eval_whisper.py. Given the same parameters and
-seed, this always produces identical splits — so eval_whisper.py can regenerate
-the exact test split used during training without needing the training script.
+Single fileset (backward compatible):
+    python create_splits.py --dataset_path cv-corpus/yue \
+        --holdback_tsv test.tsv --pct_validation 0.005 --pct_test 0.05 --seed 42
 
-Usage as standalone script:
-    python create_splits.py --dataset_path cv-corpus-25.0-2026-03-09/yue \
-        --holdback_tsv test.tsv --pct_validation 0.005 --pct_test 0.05 \
-        --seed 42 --write_splits
+Multiple filesets:
+    python create_splits.py \
+        --dataset_path cv-corpus/yue,cv-corpus/zh-CN \
+        --all_tsv validated.tsv,validated.tsv \
+        --holdback_tsv test.tsv,test.tsv \
+        --pct_validation 0.005 --pct_test 0.05 --seed 42
 
-Usage as module:
-    from create_splits import create_splits
-    splits = create_splits(dataset_path="...", pct_test=0.05, seed=42)
-    test_split = splits["test"]
+Multi-fileset logic:
+  1. For each fileset: load all_tsv, subtract holdback_tsv, carve out a
+     per-fileset test split (sized by pct_test).
+  2. Pool all remaining samples across filesets. Each sample gets a
+     "clips_dir" column so audio loading knows where to find it.
+  3. Shuffle the pool and split into train/validation.
+  4. Returns per-fileset test splits for separate evaluation, plus the
+     combined train/validation splits.
+
+Deterministic: same inputs + same seed = same splits.
 """
 
 import argparse
 import os
 from pathlib import Path
 
-from datasets import load_dataset
+from datasets import Dataset, concatenate_datasets, load_dataset
 
 
 def create_splits(
-    dataset_path,
-    all_tsv="validated.tsv",
-    holdback_tsv="",
+    dataset_paths,
+    all_tsvs=None,
+    holdback_tsvs=None,
     pct_validation=0.1,
     pct_test=0.1,
     seed=42,
@@ -35,159 +44,204 @@ def create_splits(
     write_dir=".",
 ):
     """
-    Load a Common Voice TSV, optionally exclude holdback samples, shuffle
-    with a fixed seed, and split into train/validation/test.
-
-    The split is fully deterministic: same inputs + same seed = same splits.
+    Load one or more Common Voice TSV filesets, exclude holdback samples,
+    create per-fileset test splits, pool the remainder, and split into
+    train/validation.
 
     Args:
-        dataset_path: Path to Common Voice dataset directory
-        all_tsv: TSV file with all usable samples (default: validated.tsv)
-        holdback_tsv: TSV file of samples to exclude (default: "" = none)
+        dataset_paths: str or list of str — paths to dataset directories
+        all_tsvs: str or list of str — TSV filenames (default: "validated.tsv")
+        holdback_tsvs: str or list of str — holdback TSV filenames (default: "")
         pct_validation: Fraction for validation split (default: 0.1)
-        pct_test: Fraction for test split (default: 0.1)
+        pct_test: Fraction for test split per fileset (default: 0.1)
         seed: Random seed for shuffling (default: 42)
         write_splits: Whether to write split TSVs to disk
-        write_dir: Directory to write split TSVs into (default: cwd)
+        write_dir: Directory to write split TSVs into
 
     Returns:
         dict with keys:
-            "train": Dataset with columns path + sentence
-            "validation": Dataset with columns path + sentence
-            "test": Dataset with columns path + sentence
-            "holdback": Dataset or None (raw, all original columns)
+            "train": Dataset with columns clips_dir, path, sentence
+            "validation": Dataset with columns clips_dir, path, sentence
+            "test_splits": list of Datasets (one per fileset), each with
+                           clips_dir, path, sentence
+            "holdback_splits": list of Datasets or Nones (one per fileset),
+                               raw with all original columns plus clips_dir
+            "fileset_names": list of str — directory basenames for labeling
     """
-    local_path = Path(dataset_path)
+    # ---- Normalize inputs to lists ----
+    if isinstance(dataset_paths, str):
+        dataset_paths = [p.strip() for p in dataset_paths.split(",")]
+    n_filesets = len(dataset_paths)
 
-    assert (local_path / all_tsv).exists(), \
-        f"TSV not found: {local_path / all_tsv}"
+    if all_tsvs is None:
+        all_tsvs = ["validated.tsv"] * n_filesets
+    elif isinstance(all_tsvs, str):
+        all_tsvs = [t.strip() for t in all_tsvs.split(",")]
+    if len(all_tsvs) == 1 and n_filesets > 1:
+        all_tsvs = all_tsvs * n_filesets
+
+    if holdback_tsvs is None:
+        holdback_tsvs = [""] * n_filesets
+    elif isinstance(holdback_tsvs, str):
+        holdback_tsvs = [t.strip() for t in holdback_tsvs.split(",")]
+    if len(holdback_tsvs) == 1 and n_filesets > 1:
+        holdback_tsvs = holdback_tsvs * n_filesets
+
+    assert len(all_tsvs) == n_filesets, \
+        f"all_tsvs count ({len(all_tsvs)}) must match dataset_paths count ({n_filesets})"
+    assert len(holdback_tsvs) == n_filesets, \
+        f"holdback_tsvs count ({len(holdback_tsvs)}) must match dataset_paths count ({n_filesets})"
     assert pct_validation + pct_test < 1.0, \
         f"pct_validation ({pct_validation}) + pct_test ({pct_test}) must be < 1.0"
 
-    # ---- Load all samples ----
-    print(f"Loading dataset from: {local_path / all_tsv}")
-    all_dataset = load_dataset(
-        "csv",
-        data_files=str(local_path / all_tsv),
-        delimiter="\t",
-        split="train",
-    )
-    print(f"Total samples in {all_tsv}: {len(all_dataset)}")
+    fileset_names = [Path(p).name for p in dataset_paths]
+    test_splits = []
+    holdback_splits = []
+    train_pools = []  # per-fileset remaining samples after test/holdback removal
 
-    # ---- Holdback exclusion ----
-    holdback_dataset = None
-    if holdback_tsv:
-        holdback_path = local_path / holdback_tsv
-        assert holdback_path.exists(), f"Holdback TSV not found: {holdback_path}"
-        holdback_dataset = load_dataset(
+    # ---- Process each fileset ----
+    for i, (ds_path, all_tsv, holdback_tsv) in enumerate(
+        zip(dataset_paths, all_tsvs, holdback_tsvs)
+    ):
+        local_path = Path(ds_path)
+        clips_dir = str(local_path / "clips")
+        label = fileset_names[i]
+
+        assert (local_path / all_tsv).exists(), \
+            f"[{label}] TSV not found: {local_path / all_tsv}"
+
+        print(f"\n[{label}] Loading: {local_path / all_tsv}")
+        ds = load_dataset(
             "csv",
-            data_files=str(holdback_path),
+            data_files=str(local_path / all_tsv),
             delimiter="\t",
             split="train",
         )
-        holdback_paths = set(holdback_dataset["path"])
-        before = len(all_dataset)
-        all_dataset = all_dataset.filter(
-            lambda x: x["path"] not in holdback_paths
-        )
-        print(f"Holdback: {len(holdback_paths)} samples, "
-              f"removed {before - len(all_dataset)} from available pool")
+        print(f"[{label}] Total samples: {len(ds)}")
 
-    available_count = len(all_dataset)
-    print(f"Available samples: {available_count}")
+        # ---- Holdback exclusion ----
+        holdback_ds = None
+        if holdback_tsv:
+            holdback_path = local_path / holdback_tsv
+            assert holdback_path.exists(), \
+                f"[{label}] Holdback TSV not found: {holdback_path}"
+            holdback_ds = load_dataset(
+                "csv",
+                data_files=str(holdback_path),
+                delimiter="\t",
+                split="train",
+            )
+            # Add clips_dir to holdback for audio loading
+            holdback_ds = holdback_ds.map(
+                lambda x: {"clips_dir": clips_dir}, batched=False
+            )
+            hb_paths = set(holdback_ds["path"])
+            before = len(ds)
+            ds = ds.filter(lambda x: x["path"] not in hb_paths)
+            print(f"[{label}] Holdback: {len(hb_paths)} samples, "
+                  f"removed {before - len(ds)} from available pool")
+        holdback_splits.append(holdback_ds)
 
-    # ---- Shuffle and split ----
-    all_dataset = all_dataset.shuffle(seed=seed)
+        # ---- Normalize text column ----
+        text_col = "sentence" if "sentence" in ds.column_names else "text"
+        keep_cols = {"path", text_col}
+        cols_to_remove = [c for c in ds.column_names if c not in keep_cols]
+        if cols_to_remove:
+            ds = ds.remove_columns(cols_to_remove)
+        if text_col != "sentence":
+            ds = ds.rename_column(text_col, "sentence")
 
-    n_val = int(available_count * pct_validation)
-    n_test = int(available_count * pct_test)
-    n_train = available_count - n_val - n_test
+        # ---- Add clips_dir column ----
+        ds = ds.map(lambda x: {"clips_dir": clips_dir}, batched=False)
+
+        # ---- Shuffle and carve out per-fileset test split ----
+        ds = ds.shuffle(seed=seed)
+        n_test = int(len(ds) * pct_test)
+        test_split = ds.select(range(len(ds) - n_test, len(ds)))
+        remaining = ds.select(range(len(ds) - n_test))
+
+        print(f"[{label}] Available after holdback: {len(ds)}, "
+              f"test: {n_test}, remaining for train pool: {len(remaining)}")
+
+        test_splits.append(test_split)
+        train_pools.append(remaining)
+
+    # ---- Pool all remaining samples ----
+    if len(train_pools) == 1:
+        pooled = train_pools[0]
+    else:
+        pooled = concatenate_datasets(train_pools)
+    print(f"\nPooled train+val samples: {len(pooled)}")
+
+    # ---- Shuffle the pool and split into train/validation ----
+    pooled = pooled.shuffle(seed=seed)
+    n_val = int(len(pooled) * pct_validation)
+    n_train = len(pooled) - n_val
 
     assert n_train > 0, \
-        f"No training samples left (val={n_val}, test={n_test}, total={available_count})"
+        f"No training samples left (val={n_val}, total={len(pooled)})"
 
-    train_split = all_dataset.select(range(n_train))
-    val_split = all_dataset.select(range(n_train, n_train + n_val))
-    test_split = all_dataset.select(range(n_train + n_val, n_train + n_val + n_test))
+    train_split = pooled.select(range(n_train))
+    val_split = pooled.select(range(n_train, n_train + n_val))
 
-    print(f"Split sizes — train: {n_train}, validation: {n_val}, test: {n_test}")
+    total_test = sum(len(t) for t in test_splits)
+    print(f"Final split sizes — train: {n_train}, validation: {n_val}, "
+          f"test: {total_test} ({'+'.join(str(len(t)) for t in test_splits)})")
 
     # ---- Optionally write split TSVs ----
     if write_splits:
-        import pandas as pd
         os.makedirs(write_dir, exist_ok=True)
         for name, ds in [("train_split", train_split),
-                         ("validation_split", val_split),
-                         ("test_split", test_split)]:
+                         ("validation_split", val_split)]:
             outpath = os.path.join(write_dir, f"{name}.tsv")
             ds.to_pandas().to_csv(outpath, sep="\t", index=False)
             print(f"Wrote {outpath} ({len(ds)} rows)")
-
-    # ---- Normalize columns: keep only path + sentence ----
-    text_col = "sentence" if "sentence" in train_split.column_names else "text"
-    keep_cols = {"path", text_col}
-    cols_to_remove = [c for c in train_split.column_names if c not in keep_cols]
-
-    if cols_to_remove:
-        train_split = train_split.remove_columns(cols_to_remove)
-        val_split = val_split.remove_columns(cols_to_remove)
-        test_split = test_split.remove_columns(cols_to_remove)
-
-    if text_col != "sentence":
-        train_split = train_split.rename_column(text_col, "sentence")
-        val_split = val_split.rename_column(text_col, "sentence")
-        test_split = test_split.rename_column(text_col, "sentence")
+        for i, ts in enumerate(test_splits):
+            label = fileset_names[i]
+            outpath = os.path.join(write_dir, f"test_split_{label}.tsv")
+            ts.to_pandas().to_csv(outpath, sep="\t", index=False)
+            print(f"Wrote {outpath} ({len(ts)} rows)")
 
     return {
         "train": train_split,
         "validation": val_split,
-        "test": test_split,
-        "holdback": holdback_dataset,
+        "test_splits": test_splits,
+        "holdback_splits": holdback_splits,
+        "fileset_names": fileset_names,
     }
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point — useful for inspecting or writing splits without training
+# CLI entry point
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Create deterministic train/validation/test splits from a Common Voice dataset"
+        description="Create deterministic train/validation/test splits "
+                    "from one or more Common Voice datasets"
     )
     parser.add_argument(
         "--dataset_path", type=str, required=True,
-        help="Path to Common Voice dataset directory",
+        help="Comma-separated paths to dataset directories",
     )
     parser.add_argument(
         "--all_tsv", type=str, default="validated.tsv",
-        help="TSV file with all usable samples (default: validated.tsv)",
+        help="Comma-separated TSV filenames (default: validated.tsv for all)",
     )
     parser.add_argument(
         "--holdback_tsv", type=str, default="",
-        help="TSV file of samples to exclude (default: none)",
+        help="Comma-separated holdback TSV filenames (default: none)",
     )
-    parser.add_argument(
-        "--pct_validation", type=float, default=0.1,
-    )
-    parser.add_argument(
-        "--pct_test", type=float, default=0.1,
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-    )
-    parser.add_argument(
-        "--write_splits", action="store_true",
-        help="Write train/validation/test split TSVs to current directory",
-    )
-    parser.add_argument(
-        "--write_dir", type=str, default=".",
-        help="Directory to write split TSVs into (default: current directory)",
-    )
+    parser.add_argument("--pct_validation", type=float, default=0.1)
+    parser.add_argument("--pct_test", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--write_splits", action="store_true")
+    parser.add_argument("--write_dir", type=str, default=".")
     args = parser.parse_args()
 
     splits = create_splits(
-        dataset_path=args.dataset_path,
-        all_tsv=args.all_tsv,
-        holdback_tsv=args.holdback_tsv,
+        dataset_paths=args.dataset_path,
+        all_tsvs=args.all_tsv,
+        holdback_tsvs=args.holdback_tsv,
         pct_validation=args.pct_validation,
         pct_test=args.pct_test,
         seed=args.seed,
@@ -197,9 +251,15 @@ def main():
 
     print(f"\nTrain:      {len(splits['train'])} samples")
     print(f"Validation: {len(splits['validation'])} samples")
-    print(f"Test:       {len(splits['test'])} samples")
-    if splits["holdback"] is not None:
-        print(f"Holdback:   {len(splits['holdback'])} samples")
+    for i, (ts, name) in enumerate(
+        zip(splits["test_splits"], splits["fileset_names"])
+    ):
+        print(f"Test [{name}]: {len(ts)} samples")
+    for i, (hb, name) in enumerate(
+        zip(splits["holdback_splits"], splits["fileset_names"])
+    ):
+        if hb is not None:
+            print(f"Holdback [{name}]: {len(hb)} samples")
 
 
 if __name__ == "__main__":
