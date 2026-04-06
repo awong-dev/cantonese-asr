@@ -359,86 +359,25 @@ def main():
     # -----------------------------------------------------------------------
     # 5. Load dataset and create splits
     # -----------------------------------------------------------------------
+    from create_splits import create_splits
+
     local_path = Path(args.dataset_path)
     clips_dir = str(local_path / "clips")
 
-    assert (local_path / args.all_tsv).exists(), \
-        f"TSV not found: {local_path / args.all_tsv}"
-    assert args.pct_validation + args.pct_test < 1.0, \
-        f"pct_validation ({args.pct_validation}) + pct_test ({args.pct_test}) must be < 1.0"
-
-    print(f"Loading dataset from: {local_path / args.all_tsv}")
-    all_dataset = load_dataset(
-        "csv",
-        data_files=str(local_path / args.all_tsv),
-        delimiter="\t",
-        split="train",
+    splits = create_splits(
+        dataset_path=args.dataset_path,
+        all_tsv=args.all_tsv,
+        holdback_tsv=args.holdback_tsv,
+        pct_validation=args.pct_validation,
+        pct_test=args.pct_test,
+        seed=args.seed,
+        write_splits=args.write_splits,
     )
-    print(f"Total samples in {args.all_tsv}: {len(all_dataset)}")
 
-    # ---- Holdback exclusion ----
-    holdback_dataset = None
-    if args.holdback_tsv:
-        holdback_path = local_path / args.holdback_tsv
-        assert holdback_path.exists(), f"Holdback TSV not found: {holdback_path}"
-        holdback_dataset = load_dataset(
-            "csv",
-            data_files=str(holdback_path),
-            delimiter="\t",
-            split="train",
-        )
-        holdback_paths = set(holdback_dataset["path"])
-        before = len(all_dataset)
-        all_dataset = all_dataset.filter(
-            lambda x: x["path"] not in holdback_paths
-        )
-        print(f"Holdback: {len(holdback_paths)} samples, "
-              f"removed {before - len(all_dataset)} from available pool")
-
-    available_count = len(all_dataset)
-    print(f"Available samples: {available_count}")
-
-    # ---- Shuffle and split ----
-    all_dataset = all_dataset.shuffle(seed=args.seed)
-
-    n_val = int(available_count * args.pct_validation)
-    n_test = int(available_count * args.pct_test)
-    n_train = available_count - n_val - n_test
-
-    assert n_train > 0, \
-        f"No training samples left (val={n_val}, test={n_test}, total={available_count})"
-
-    train_split = all_dataset.select(range(n_train))
-    val_split = all_dataset.select(range(n_train, n_train + n_val))
-    test_split = all_dataset.select(range(n_train + n_val, n_train + n_val + n_test))
-
-    print(f"Split sizes — train: {n_train}, validation: {n_val}, test: {n_test}")
-
-    # ---- Optionally write split TSVs ----
-    if args.write_splits:
-        import pandas as pd
-        for name, ds in [("train_split", train_split),
-                         ("validation_split", val_split),
-                         ("test_split", test_split)]:
-            df = ds.to_pandas()
-            outpath = f"{name}.tsv"
-            df.to_csv(outpath, sep="\t", index=False)
-            print(f"Wrote {outpath} ({len(df)} rows)")
-
-    # ---- Detect and normalize text column ----
-    text_col = "sentence" if "sentence" in train_split.column_names else "text"
-    keep_cols = {"path", text_col}
-    cols_to_remove = [c for c in train_split.column_names if c not in keep_cols]
-
-    if cols_to_remove:
-        train_split = train_split.remove_columns(cols_to_remove)
-        val_split = val_split.remove_columns(cols_to_remove)
-        test_split = test_split.remove_columns(cols_to_remove)
-
-    if text_col != "sentence":
-        train_split = train_split.rename_column(text_col, "sentence")
-        val_split = val_split.rename_column(text_col, "sentence")
-        test_split = test_split.rename_column(text_col, "sentence")
+    train_split = splits["train"]
+    val_split = splits["validation"]
+    test_split = splits["test"]
+    holdback_dataset = splits["holdback"]
 
     # Optionally subsample training set
     if args.max_train_samples and args.max_train_samples < len(train_split):
@@ -867,6 +806,16 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGQUIT, _signal_handler)
 
+    # Evaluate the base model before training to establish a baseline
+    print("Evaluating base model before training...")
+    base_metrics = trainer.evaluate(metric_key_prefix="base")
+    base_cer = base_metrics.get("base_cer_raw", None)
+    base_cer_norm = base_metrics.get("base_cer_nopunct", None)
+    if base_cer is not None:
+        print(f"  Base CER (raw):     {base_cer:.4f}")
+    if base_cer_norm is not None:
+        print(f"  Base CER (nopunct): {base_cer_norm:.4f}")
+
     print("Starting training...")
     trainer.train(
         resume_from_checkpoint=args.resume_from_checkpoint if args.resume_from_checkpoint else None,
@@ -894,57 +843,26 @@ def main():
     # -----------------------------------------------------------------------
     # 14. Final evaluation on all splits
     # -----------------------------------------------------------------------
-    # After training, evaluate the best model on validation, test, and
-    # optionally holdback splits. This gives a complete picture of model
-    # performance on seen (validation) vs unseen (test/holdback) data.
-    print("\n" + "=" * 60)
-    print("FINAL EVALUATION")
-    print("=" * 60)
+    # Use the standalone eval script to evaluate the saved model.
+    # Pass the split parameters so it can regenerate the same splits.
+    from eval_whisper import run_evaluation
 
-    def evaluate_split(dataset, split_name):
-        """Run evaluation on a dataset split and print CER + loss."""
-        print(f"\nEvaluating on {split_name} ({len(dataset)} samples)...")
-        metrics = trainer.evaluate(
-            eval_dataset=dataset, metric_key_prefix=split_name
-        )
-        cer = metrics.get(f"{split_name}_cer_raw", None)
-        cer_norm = metrics.get(f"{split_name}_cer_nopunct", None)
-        loss = metrics.get(f"{split_name}_loss", None)
-        if cer is not None:
-            print(f"  {split_name} CER (raw):     {cer:.4f}")
-        if cer_norm is not None:
-            print(f"  {split_name} CER (nopunct): {cer_norm:.4f}")
-        if loss is not None:
-            print(f"  {split_name} Loss:           {loss:.4f}")
-        return metrics
+    run_evaluation(
+        model_path=final_dir,
+        dataset_path=args.dataset_path,
+        all_tsv=args.all_tsv,
+        holdback_tsv=args.holdback_tsv if args.holdback_tsv else None,
+        pct_validation=args.pct_validation,
+        pct_test=args.pct_test,
+        seed=args.seed,
+        eval_test=True,
+        eval_holdback=bool(args.holdback_tsv),
+        language_full=args.language_full,
+        eval_batch_size=args.eval_batch_size or args.train_batch_size,
+        eval_accumulation_steps=args.eval_accumulation_steps,
+        nopunct_in_eval=args.nopunct_in_eval,
+    )
 
-    val_metrics = evaluate_split(eval_dataset, "validation")
-    test_metrics = evaluate_split(test_dataset, "test")
-
-    holdback_metrics = None
-    if holdback_eval_dataset is not None:
-        holdback_metrics = evaluate_split(holdback_eval_dataset, "holdback")
-
-    # ---- Summary ----
-    print("\n" + "=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
-    for name, m in [("Validation", val_metrics),
-                    ("Test", test_metrics),
-                    ("Holdback", holdback_metrics)]:
-        if m is None:
-            continue
-        prefix = name.lower()
-        cer = m.get(f"{prefix}_cer_raw", "N/A")
-        cer_norm = m.get(f"{prefix}_cer_nopunct", None)
-        if isinstance(cer, float):
-            line = f"  {name:12s} CER: {cer:.4f}"
-            if isinstance(cer_norm, float):
-                line += f"  (nopunct: {cer_norm:.4f})"
-            print(line)
-        else:
-            print(f"  {name:12s} CER: {cer}")
-    print("=" * 60)
     print("\nDone!")
 
 
