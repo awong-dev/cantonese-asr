@@ -29,7 +29,6 @@ from transformers import (
     WhisperProcessor,
     WhisperTokenizer,
 )
-from transformers.optimization import get_scheduler
 
 # Suppress noisy warnings
 warnings.filterwarnings(
