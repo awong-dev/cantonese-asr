@@ -1,0 +1,153 @@
+"""
+Shared CER (Character Error Rate) utilities for Whisper and wav2vec2 training/eval.
+
+Provides:
+  - build_text_normalize(): creates the jiwer text normalization pipeline
+  - build_cer_transform(): creates the jiwer CER transform pipeline
+  - compute_cer(): computes raw + nopunct CER from prediction/reference lists
+  - evaluate_and_summarize(): runs evaluation on multiple splits and prints summary
+"""
+
+import evaluate
+import jiwer
+
+
+def build_text_normalize():
+    """
+    Build a jiwer Compose transform for text normalization.
+    Removes punctuation, lowercases, and normalizes whitespace.
+    Used for cleaning training labels.
+    """
+    return jiwer.Compose([
+        jiwer.RemovePunctuation(),
+        jiwer.ToLowerCase(),
+        jiwer.RemoveWhiteSpace(replace_by_space=True),
+        jiwer.RemoveMultipleSpaces(),
+        jiwer.Strip(),
+    ])
+
+
+def build_cer_transform():
+    """
+    Build a jiwer Compose transform for normalized CER evaluation.
+    Removes punctuation, lowercases, normalizes whitespace, and splits
+    into character lists (required for jiwer.process_characters).
+    """
+    return jiwer.Compose([
+        jiwer.RemovePunctuation(),
+        jiwer.ToLowerCase(),
+        jiwer.RemoveWhiteSpace(replace_by_space=True),
+        jiwer.RemoveMultipleSpaces(),
+        jiwer.Strip(),
+        jiwer.ReduceToListOfListOfChars(),
+    ])
+
+
+# Module-level CER metric (loaded once, reused)
+_cer_metric = evaluate.load("cer")
+
+
+def compute_cer(pred_list, label_list, cer_transform=None):
+    """
+    Compute raw CER and optionally normalized (nopunct) CER.
+
+    Args:
+        pred_list: list of predicted strings
+        label_list: list of reference strings
+        cer_transform: jiwer Compose transform for normalized CER (or None)
+
+    Returns:
+        dict with "cer_raw" and optionally "cer_nopunct"
+    """
+    # Filter out empty references to avoid division by zero
+    pairs = [(p, l) for p, l in zip(pred_list, label_list) if len(l.strip()) > 0]
+    if not pairs:
+        result = {"cer_raw": 1.0}
+        if cer_transform is not None:
+            result["cer_nopunct"] = 1.0
+        return result, [], []
+
+    filtered_preds, filtered_refs = zip(*pairs)
+    filtered_preds = list(filtered_preds)
+    filtered_refs = list(filtered_refs)
+
+    # Raw CER
+    cer_raw = _cer_metric.compute(predictions=filtered_preds, references=filtered_refs)
+    result = {"cer_raw": cer_raw}
+
+    # Normalized CER (punctuation removed, lowercased, whitespace normalized)
+    if cer_transform is not None:
+        output = jiwer.process_characters(
+            filtered_refs, filtered_preds,
+            reference_transform=cer_transform,
+            hypothesis_transform=cer_transform,
+        )
+        result["cer_nopunct"] = output.cer
+
+    return result, filtered_preds, filtered_refs
+
+
+def print_examples(pred_list, label_list, num_examples=5):
+    """Print sample REF/HYP pairs for debugging."""
+    for i in range(min(num_examples, len(pred_list))):
+        print(f"  REF: {label_list[i][:80]}")
+        print(f"  HYP: {pred_list[i][:80]}")
+        print()
+
+
+def evaluate_and_summarize(trainer, eval_splits, num_examples=5):
+    """
+    Run evaluation on multiple (name, dataset) pairs and print a summary.
+
+    Args:
+        trainer: HuggingFace Trainer instance
+        eval_splits: list of (split_name, dataset) tuples
+        num_examples: number of REF/HYP pairs to print per split
+
+    Returns:
+        dict mapping split names to their metrics dicts
+    """
+    results = {}
+
+    print("\n" + "=" * 60)
+    print("EVALUATION")
+    print("=" * 60)
+
+    for split_name, dataset in eval_splits:
+        print(f"\nEvaluating on {split_name} ({len(dataset)} samples)...")
+        try:
+            metrics = trainer.evaluate(
+                eval_dataset=dataset, metric_key_prefix=split_name
+            )
+        except Exception as e:
+            print(f"  {split_name} evaluation failed: {e}")
+            continue
+
+        cer_raw = metrics.get(f"{split_name}_cer_raw", None)
+        cer_nopunct = metrics.get(f"{split_name}_cer_nopunct", None)
+        loss = metrics.get(f"{split_name}_loss", None)
+
+        if cer_raw is not None:
+            print(f"  {split_name} CER (raw):     {cer_raw:.4f}")
+        if cer_nopunct is not None:
+            print(f"  {split_name} CER (nopunct): {cer_nopunct:.4f}")
+        if loss is not None:
+            print(f"  {split_name} Loss:           {loss:.4f}")
+
+        results[split_name] = metrics
+
+    # ---- Summary ----
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    for name, m in results.items():
+        cer_raw = m.get(f"{name}_cer_raw", None)
+        cer_nopunct = m.get(f"{name}_cer_nopunct", None)
+        if cer_raw is not None:
+            line = f"  {name:24s} CER: {cer_raw:.4f}"
+            if cer_nopunct is not None:
+                line += f"  (nopunct: {cer_nopunct:.4f})"
+            print(line)
+    print("=" * 60)
+
+    return results
