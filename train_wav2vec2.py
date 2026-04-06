@@ -187,19 +187,13 @@ def parse_args():
 # 2. Text preprocessing
 # ---------------------------------------------------------------------------
 import jiwer
-from cer_utils import build_cer_transform, compute_cer, print_examples
+from cer_utils import (
+    build_cer_transform, build_text_normalize, compute_cer,
+    evaluate_and_summarize, print_examples,
+)
 
-# jiwer pipeline for text normalization: removes punctuation, lowercases,
-# and normalizes whitespace. Used for cleaning training labels.
-_text_normalize = jiwer.Compose([
-    jiwer.RemovePunctuation(),
-    jiwer.ToLowerCase(),
-    jiwer.RemoveWhiteSpace(replace_by_space=True),
-    jiwer.RemoveMultipleSpaces(),
-    jiwer.Strip(),
-])
-
-# CER transform from shared module
+# Shared normalization pipelines from cer_utils
+_text_normalize = build_text_normalize()
 _cer_transform = build_cer_transform()
 
 
@@ -672,60 +666,15 @@ def main():
     # -----------------------------------------------------------------------
     # 16. Final evaluation on all splits
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("Final evaluation (best model)")
-    print("=" * 60)
-
-    def evaluate_split(dataset, split_name):
-        try:
-            metrics = trainer.evaluate(eval_dataset=dataset, metric_key_prefix=split_name)
-            cer_raw = metrics.get(f"{split_name}_cer_raw", None)
-            cer_nopunct = metrics.get(f"{split_name}_cer_nopunct", None)
-            if cer_raw is not None:
-                print(f"  {split_name} CER (raw):     {cer_raw:.4f}")
-            if cer_nopunct is not None:
-                print(f"  {split_name} CER (nopunct): {cer_nopunct:.4f}")
-            return metrics
-        except Exception as e:
-            print(f"  {split_name} evaluation failed: {e}")
-            return None
-
-    all_results = {}
-
-    # Validation
-    val_metrics = evaluate_split(eval_dataset, "validation")
-    if val_metrics:
-        all_results["validation"] = val_metrics
-
-    # Per-fileset test splits
+    eval_splits = [("validation", eval_dataset)]
     for name, ts_prep in test_prepared:
-        label = f"test_{name}"
-        m = evaluate_split(ts_prep, label)
-        if m:
-            all_results[label] = m
-
-    # Per-fileset holdback splits
+        eval_splits.append((f"test_{name}", ts_prep))
     for item in holdback_prepared:
         if item is not None:
             name, hb_prep = item
-            label = f"holdback_{name}"
-            m = evaluate_split(hb_prep, label)
-            if m:
-                all_results[label] = m
+            eval_splits.append((f"holdback_{name}", hb_prep))
 
-    # ---- Summary ----
-    print("\n" + "=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
-    for name, m in all_results.items():
-        cer_raw = m.get(f"{name}_cer_raw", None)
-        cer_nopunct = m.get(f"{name}_cer_nopunct", None)
-        if cer_raw is not None:
-            line = f"  {name:24s} CER (raw): {cer_raw:.4f}"
-            if cer_nopunct is not None:
-                line += f"  (nopunct: {cer_nopunct:.4f})"
-            print(line)
-    print("=" * 60)
+    all_results = evaluate_and_summarize(trainer, eval_splits)
 
     print("\nDone!")
 
