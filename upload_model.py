@@ -90,7 +90,11 @@ def parse_args():
     )
     parser.add_argument(
         "--cer", type=float, default=None,
-        help="Best CER to report (overrides auto-detection from trainer_state)",
+        help="Best CER (no-punctuation) to report (overrides auto-detection from trainer_state)",
+    )
+    parser.add_argument(
+        "--cer_raw", type=float, default=None,
+        help="Best raw CER to report (overrides auto-detection from trainer_state)",
     )
     parser.add_argument(
         "--trainer_state", type=str, default=None,
@@ -195,26 +199,37 @@ def parse_training_stats(trainer_state_path: Path) -> dict:
     }
 
     # Extract eval history from log_history
+    # Support both legacy single-CER ("eval_cer") and dual-CER ("eval_cer_raw" / "eval_cer_nopunct")
     for entry in state.get("log_history", []):
-        if "eval_cer" in entry:
+        has_dual = "eval_cer_nopunct" in entry or "eval_cer_raw" in entry
+        has_legacy = "eval_cer" in entry
+        if has_dual or has_legacy:
             stats["eval_history"].append({
                 "step": entry.get("step"),
                 "epoch": entry.get("epoch"),
                 "eval_loss": entry.get("eval_loss"),
-                "eval_cer": entry.get("eval_cer"),
+                "eval_cer_raw": entry.get("eval_cer_raw", entry.get("eval_cer")),
+                "eval_cer_nopunct": entry.get("eval_cer_nopunct"),
             })
         if "epoch" in entry:
             stats["epoch"] = entry["epoch"]
 
-    # Find best CER from eval history
+    # Find best CER from eval history (prefer cer_nopunct, fall back to cer_raw)
     if stats["eval_history"]:
-        best_eval = min(stats["eval_history"], key=lambda x: x["eval_cer"])
-        stats["best_cer"] = best_eval["eval_cer"]
-        stats["best_cer_step"] = best_eval["step"]
-        stats["best_cer_epoch"] = best_eval["epoch"]
-        stats["best_eval_loss"] = best_eval["eval_loss"]
+        has_nopunct = any(e.get("eval_cer_nopunct") is not None for e in stats["eval_history"])
+        best_key = "eval_cer_nopunct" if has_nopunct else "eval_cer_raw"
+        candidates = [e for e in stats["eval_history"] if e.get(best_key) is not None]
+        if candidates:
+            best_eval = min(candidates, key=lambda x: x[best_key])
+            stats["best_cer_nopunct"] = best_eval.get("eval_cer_nopunct")
+            stats["best_cer_raw"] = best_eval.get("eval_cer_raw")
+            stats["best_cer_step"] = best_eval["step"]
+            stats["best_cer_epoch"] = best_eval["epoch"]
+            stats["best_eval_loss"] = best_eval["eval_loss"]
     else:
-        stats["best_cer"] = stats["best_metric"]
+        # Fall back to best_metric from trainer state (legacy single-CER)
+        stats["best_cer_nopunct"] = stats["best_metric"]
+        stats["best_cer_raw"] = None
 
     return stats
 
@@ -237,10 +252,16 @@ def generate_model_card(args, stats: dict | None, model_type: str, has_runs: boo
     """Generate a HuggingFace model card (README.md)."""
     repo_id = f"{args.username}/{args.repo_name}"
 
-    # Determine best CER
-    best_cer = args.cer
-    if best_cer is None and stats:
-        best_cer = stats.get("best_cer")
+    # Determine best CER values (nopunct is the primary metric)
+    best_cer_nopunct = args.cer
+    best_cer_raw = args.cer_raw
+    if best_cer_nopunct is None and stats:
+        best_cer_nopunct = stats.get("best_cer_nopunct")
+    if best_cer_raw is None and stats:
+        best_cer_raw = stats.get("best_cer_raw")
+
+    # Primary CER for YAML metadata (no-punctuation)
+    best_cer = best_cer_nopunct
 
     # YAML frontmatter
     tags = ["automatic-speech-recognition", args.language, args.language_name.lower()]
@@ -283,8 +304,14 @@ def generate_model_card(args, stats: dict | None, model_type: str, has_runs: boo
             "        metrics:",
             "          - type: cer",
             f"            value: {best_cer:.4f}",
-            "            name: CER",
+            "            name: CER (no punctuation)",
         ])
+        if best_cer_raw is not None:
+            yaml_lines.extend([
+                "          - type: cer",
+                f"            value: {best_cer_raw:.4f}",
+                "            name: CER (raw)",
+            ])
 
     yaml_lines.append("---")
 
@@ -319,8 +346,10 @@ def generate_model_card(args, stats: dict | None, model_type: str, has_runs: boo
             "",
             "| Metric | Value |",
             "|--------|-------|",
-            f"| **CER** | **{best_cer:.2%}** |",
+            f"| **CER (no punctuation)** | **{best_cer:.2%}** |",
         ])
+        if best_cer_raw is not None:
+            md_lines.append(f"| CER (raw) | {best_cer_raw:.2%} |")
         if stats and stats.get("best_eval_loss"):
             md_lines.append(f"| Eval Loss | {stats['best_eval_loss']:.4f} |")
         if stats and stats.get("best_cer_step"):
@@ -330,18 +359,37 @@ def generate_model_card(args, stats: dict | None, model_type: str, has_runs: boo
 
     # Training history table
     if stats and stats.get("eval_history"):
-        md_lines.extend([
-            "",
-            "### Training History",
-            "",
-            "| Step | Epoch | Eval Loss | CER |",
-            "|------|-------|-----------|-----|",
-        ])
-        for entry in stats["eval_history"]:
-            epoch_str = f"{entry['epoch']:.2f}" if entry.get("epoch") else "-"
-            loss_str = f"{entry['eval_loss']:.4f}" if entry.get("eval_loss") else "-"
-            cer_str = f"{entry['eval_cer']:.2%}" if entry.get("eval_cer") else "-"
-            md_lines.append(f"| {entry.get('step', '-')} | {epoch_str} | {loss_str} | {cer_str} |")
+        has_nopunct = any(e.get("eval_cer_nopunct") is not None for e in stats["eval_history"])
+        has_raw = any(e.get("eval_cer_raw") is not None for e in stats["eval_history"])
+
+        if has_nopunct and has_raw:
+            md_lines.extend([
+                "",
+                "### Training History",
+                "",
+                "| Step | Epoch | Eval Loss | CER (nopunct) | CER (raw) |",
+                "|------|-------|-----------|---------------|-----------|",
+            ])
+            for entry in stats["eval_history"]:
+                epoch_str = f"{entry['epoch']:.2f}" if entry.get("epoch") else "-"
+                loss_str = f"{entry['eval_loss']:.4f}" if entry.get("eval_loss") else "-"
+                cer_np_str = f"{entry['eval_cer_nopunct']:.2%}" if entry.get("eval_cer_nopunct") is not None else "-"
+                cer_raw_str = f"{entry['eval_cer_raw']:.2%}" if entry.get("eval_cer_raw") is not None else "-"
+                md_lines.append(f"| {entry.get('step', '-')} | {epoch_str} | {loss_str} | {cer_np_str} | {cer_raw_str} |")
+        else:
+            # Legacy single-CER format
+            md_lines.extend([
+                "",
+                "### Training History",
+                "",
+                "| Step | Epoch | Eval Loss | CER |",
+                "|------|-------|-----------|-----|",
+            ])
+            for entry in stats["eval_history"]:
+                epoch_str = f"{entry['epoch']:.2f}" if entry.get("epoch") else "-"
+                loss_str = f"{entry['eval_loss']:.4f}" if entry.get("eval_loss") else "-"
+                cer_str = f"{entry['eval_cer_raw']:.2%}" if entry.get("eval_cer_raw") is not None else "-"
+                md_lines.append(f"| {entry.get('step', '-')} | {epoch_str} | {loss_str} | {cer_str} |")
 
     # Training details
     md_lines.extend([
@@ -506,10 +554,12 @@ def main():
     if trainer_state_path and trainer_state_path.exists():
         print(f"Found trainer_state: {trainer_state_path}")
         stats = parse_training_stats(trainer_state_path)
-        if stats.get("best_cer"):
-            print(f"Best CER from training: {stats['best_cer']:.4f} "
+        if stats.get("best_cer_nopunct"):
+            print(f"Best CER (nopunct) from training: {stats['best_cer_nopunct']:.4f} "
                   f"(step {stats.get('best_cer_step')}, "
                   f"epoch {stats.get('best_cer_epoch', '?')})")
+        if stats.get("best_cer_raw"):
+            print(f"Best CER (raw) from training: {stats['best_cer_raw']:.4f}")
         if stats.get("eval_history"):
             print(f"Eval history: {len(stats['eval_history'])} checkpoints")
     else:
