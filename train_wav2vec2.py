@@ -572,7 +572,7 @@ def main():
         result, filtered_preds, filtered_refs = compute_cer(
             pred_str, label_str, cer_transform=_cer_transform
         )
-        print_examples(filtered_preds, filtered_refs, num_examples=5)
+        print_examples(filtered_preds, filtered_refs)
         return result
 
     # -----------------------------------------------------------------------

@@ -87,22 +87,43 @@ def compute_cer(pred_list, label_list, cer_transform=None):
     return result, filtered_preds, filtered_refs
 
 
-def print_examples(pred_list, label_list, num_examples=5):
-    """Print sample REF/HYP pairs for debugging."""
-    for i in range(min(num_examples, len(pred_list))):
-        print(f"  REF: {label_list[i][:80]}")
-        print(f"  HYP: {pred_list[i][:80]}")
-        print()
+def print_examples(pred_list, label_list, num_stable=3, num_random=3):
+    """Print sample REF/HYP pairs for debugging.
+
+    Shows num_stable fixed examples (evenly spaced indices) followed by
+    num_random randomly chosen examples.
+    """
+    import random
+
+    n = len(pred_list)
+    if n == 0:
+        return
+
+    # Stable: evenly spaced indices so the same samples appear every eval
+    if n <= num_stable:
+        stable_indices = list(range(n))
+    else:
+        stable_indices = [i * n // num_stable for i in range(num_stable)]
+    stable_set = set(stable_indices)
+
+    # Random: pick from the remaining indices
+    remaining = [i for i in range(n) if i not in stable_set]
+    random_indices = random.sample(remaining, min(num_random, len(remaining)))
+
+    for tag, indices in [("stable", stable_indices), ("random", random_indices)]:
+        for i in indices:
+            print(f"  [{tag}] REF: {label_list[i][:80]}")
+            print(f"  [{tag}] HYP: {pred_list[i][:80]}")
+            print()
 
 
-def evaluate_and_summarize(trainer, eval_splits, num_examples=5):
+def evaluate_and_summarize(trainer, eval_splits):
     """
     Run evaluation on multiple (name, dataset) pairs and print a summary.
 
     Args:
         trainer: HuggingFace Trainer instance
         eval_splits: list of (split_name, dataset) tuples
-        num_examples: number of REF/HYP pairs to print per split
 
     Returns:
         dict mapping split names to their metrics dicts

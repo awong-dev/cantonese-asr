@@ -104,7 +104,6 @@ def run_evaluation(
     eval_holdback=False,
     eval_batch_size=8,
     eval_accumulation_steps=16,
-    num_examples=5,
 ):
     """Evaluate a wav2vec2 model on test and/or holdback splits."""
 
@@ -230,7 +229,7 @@ def run_evaluation(
         result, filtered_preds, filtered_refs = compute_cer(
             pred_str, label_str, cer_transform=_cer_transform
         )
-        print_examples(filtered_preds, filtered_refs, num_examples=num_examples)
+        print_examples(filtered_preds, filtered_refs)
         return result
 
     # ---- Trainer for evaluation ----
@@ -311,7 +310,6 @@ def main():
     parser.add_argument("--eval_holdback", action="store_true")
     parser.add_argument("--eval_batch_size", type=int, default=8)
     parser.add_argument("--eval_accumulation_steps", type=int, default=16)
-    parser.add_argument("--num_examples", type=int, default=5)
     args = parser.parse_args()
 
     has_explicit = args.test_tsv is not None
@@ -334,7 +332,6 @@ def main():
         eval_holdback=args.eval_holdback,
         eval_batch_size=args.eval_batch_size,
         eval_accumulation_steps=args.eval_accumulation_steps,
-        num_examples=args.num_examples,
     )
 
 

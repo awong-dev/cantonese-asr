@@ -93,7 +93,6 @@ def run_evaluation(
     eval_batch_size=32,
     eval_accumulation_steps=32,
     nopunct_in_eval=False,
-    num_examples=5,
 ):
     """
     Evaluate a Whisper model on test and/or holdback splits.
@@ -251,7 +250,7 @@ def run_evaluation(
         all_preds.extend(filtered_preds)
         all_refs.extend(filtered_refs)
 
-        print_examples(filtered_preds, filtered_refs, num_examples=num_examples)
+        print_examples(filtered_preds, filtered_refs)
         return result
 
     # ---- Trainer for evaluation ----
@@ -369,7 +368,6 @@ def main():
     parser.add_argument("--eval_batch_size", type=int, default=32)
     parser.add_argument("--eval_accumulation_steps", type=int, default=32)
     parser.add_argument("--nopunct_in_eval", action="store_true")
-    parser.add_argument("--num_examples", type=int, default=5)
     args = parser.parse_args()
 
     has_explicit = args.test_tsv is not None
@@ -395,7 +393,6 @@ def main():
         eval_batch_size=args.eval_batch_size,
         eval_accumulation_steps=args.eval_accumulation_steps,
         nopunct_in_eval=args.nopunct_in_eval,
-        num_examples=args.num_examples,
     )
 
 
