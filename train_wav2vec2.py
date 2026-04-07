@@ -112,25 +112,8 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
     parser.add_argument("--warmup", type=int, default=1000, help="Warmup steps")
     parser.add_argument("--epochs", type=int, default=15, help="Number of epochs")
-    parser.add_argument(
-        "--lr_schedule", type=str, default="cosine",
-        choices=["cosine", "tri_stage"],
-        help="LR schedule: 'cosine' (HF default) or 'tri_stage' (fairseq-style "
-             "warmup/hold/decay). (default: cosine)",
-    )
-    # tri_stage specific args (ignored when lr_schedule=cosine)
-    parser.add_argument(
-        "--tri_stage_warmup_pct", type=float, default=0.1,
-        help="Fraction of total steps for warmup phase (default: 0.1)",
-    )
-    parser.add_argument(
-        "--tri_stage_hold_pct", type=float, default=0.4,
-        help="Fraction of total steps for hold phase (default: 0.4)",
-    )
-    parser.add_argument(
-        "--tri_stage_final_lr_scale", type=float, default=0.05,
-        help="Final LR as a fraction of peak LR (default: 0.05)",
-    )
+    from lr_schedule import add_lr_schedule_args
+    add_lr_schedule_args(parser)
     parser.add_argument(
         "--train_batch_size", type=int, default=4,
         help="Per-device train batch size",
@@ -277,54 +260,6 @@ class CTCTrainer(Trainer):
         loss = outputs.loss
         return (loss, outputs) if return_outputs else loss
 
-
-# ---------------------------------------------------------------------------
-# 4b. Tri-stage LR scheduler (fairseq-style)
-# ---------------------------------------------------------------------------
-from torch.optim.lr_scheduler import LambdaLR
-
-
-def get_tri_stage_schedule(
-    optimizer,
-    num_training_steps,
-    warmup_pct=0.1,
-    hold_pct=0.4,
-    final_lr_scale=0.05,
-):
-    """
-    Create a tri-stage LR schedule: linear warmup → constant hold → linear decay.
-
-    This is the schedule used in the original fairseq wav2vec2 fine-tuning recipe.
-    The LR ramps linearly from 0 to peak during warmup, holds at peak, then
-    decays linearly to final_lr_scale * peak_lr.
-
-    Args:
-        optimizer: The optimizer to schedule
-        num_training_steps: Total number of training steps
-        warmup_pct: Fraction of steps for warmup (default: 0.1)
-        hold_pct: Fraction of steps for hold (default: 0.4)
-        final_lr_scale: Final LR as fraction of peak (default: 0.05)
-
-    Returns:
-        LambdaLR scheduler
-    """
-    warmup_steps = int(num_training_steps * warmup_pct)
-    hold_steps = int(num_training_steps * hold_pct)
-    decay_steps = num_training_steps - warmup_steps - hold_steps
-
-    def lr_lambda(current_step):
-        if current_step < warmup_steps:
-            # Linear warmup: 0 → 1
-            return current_step / max(1, warmup_steps)
-        elif current_step < warmup_steps + hold_steps:
-            # Hold at peak
-            return 1.0
-        else:
-            # Linear decay: 1 → final_lr_scale
-            decay_progress = (current_step - warmup_steps - hold_steps) / max(1, decay_steps)
-            return max(final_lr_scale, 1.0 - (1.0 - final_lr_scale) * decay_progress)
-
-    return LambdaLR(optimizer, lr_lambda)
 
 
 # ---------------------------------------------------------------------------
@@ -656,19 +591,8 @@ def main():
     print(f"Steps per epoch: {steps_per_epoch}")
     print(f"Total steps: {total_steps}")
 
-    # For tri_stage, we set the HF scheduler to "constant" and override it
-    # after Trainer creation. For cosine, use HF's built-in cosine schedule.
-    if args.lr_schedule == "tri_stage":
-        hf_scheduler_type = "constant"
-        hf_warmup_steps = 0  # tri_stage handles its own warmup
-        print(f"LR schedule: tri_stage (warmup={args.tri_stage_warmup_pct:.0%}, "
-              f"hold={args.tri_stage_hold_pct:.0%}, "
-              f"decay={1-args.tri_stage_warmup_pct-args.tri_stage_hold_pct:.0%}, "
-              f"final_lr_scale={args.tri_stage_final_lr_scale})")
-    else:
-        hf_scheduler_type = "cosine"
-        hf_warmup_steps = args.warmup
-        print(f"LR schedule: cosine (warmup={args.warmup} steps)")
+    from lr_schedule import resolve_lr_schedule_args
+    hf_scheduler_type, hf_warmup_steps, tri_stage_args = resolve_lr_schedule_args(args, total_steps)
 
     training_args = TrainingArguments(
         output_dir=args.output_dir,
@@ -717,14 +641,7 @@ def main():
     # Build the Trainer class dynamically based on options
     # - CTCTrainer: needed for torch.compile compatibility
     # - tri_stage: needs create_scheduler override
-    tri_stage_args = None
-    if args.lr_schedule == "tri_stage":
-        tri_stage_args = {
-            "num_training_steps": total_steps,
-            "warmup_pct": args.tri_stage_warmup_pct,
-            "hold_pct": args.tri_stage_hold_pct,
-            "final_lr_scale": args.tri_stage_final_lr_scale,
-        }
+    from lr_schedule import get_tri_stage_schedule
 
     BaseTrainer = CTCTrainer if args.compile else Trainer
 

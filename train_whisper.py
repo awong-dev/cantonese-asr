@@ -149,6 +149,10 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--warmup", type=int, default=500, help="Warmup steps")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
+
+    # LR schedule (cosine or tri_stage)
+    from lr_schedule import add_lr_schedule_args
+    add_lr_schedule_args(parser)
     parser.add_argument("--train_batch_size", type=int, default=4)
     parser.add_argument("--eval_batch_size", type=int, default=None)
     parser.add_argument(
@@ -264,10 +268,12 @@ class DifferentialLRTrainer(Seq2SeqTrainer):
         "cache_position",
     }
 
-    def __init__(self, *args, encoder_lr=None, processor=None, tokenizer=None, **kwargs):
+    def __init__(self, *args, encoder_lr=None, processor=None, tokenizer=None,
+                 tri_stage_args=None, **kwargs):
         self.encoder_lr = encoder_lr
         self._whisper_processor = processor
         self._whisper_tokenizer = tokenizer
+        self._tri_stage_args = tri_stage_args
         super().__init__(*args, **kwargs)
 
     def _save(self, output_dir=None, state_dict=None):
@@ -322,6 +328,16 @@ class DifferentialLRTrainer(Seq2SeqTrainer):
         print(f"    Encoder: {len(encoder_params)} tensors, lr={self.encoder_lr}")
         print(f"    Decoder: {len(decoder_params)} tensors, lr={self.args.learning_rate}")
         return self.optimizer
+
+    def create_scheduler(self, num_training_steps, optimizer=None):
+        if self._tri_stage_args is not None:
+            from lr_schedule import get_tri_stage_schedule
+            self.lr_scheduler = get_tri_stage_schedule(
+                optimizer if optimizer is not None else self.optimizer,
+                **self._tri_stage_args,
+            )
+            return self.lr_scheduler
+        return super().create_scheduler(num_training_steps, optimizer)
 
 
 # ---------------------------------------------------------------------------
@@ -603,14 +619,19 @@ def main():
     # -----------------------------------------------------------------------
     # Disk-cached datasets know their length so we can use num_train_epochs.
     # Streaming datasets don't, so we compute max_steps manually.
+    steps_per_epoch = train_len // (args.train_batch_size * args.grad_accum)
+    total_steps = steps_per_epoch * args.epochs
+
     if no_streaming_train:
         epoch_or_steps_args = {"num_train_epochs": args.epochs}
     else:
-        steps_per_epoch = train_len // (args.train_batch_size * args.grad_accum)
-        max_steps = steps_per_epoch * args.epochs
-        epoch_or_steps_args = {"max_steps": max_steps}
+        epoch_or_steps_args = {"max_steps": total_steps}
         print(f"Steps per epoch: {steps_per_epoch}")
-        print(f"Max steps: {max_steps}")
+        print(f"Max steps: {total_steps}")
+
+    # Resolve LR schedule (cosine vs tri_stage)
+    from lr_schedule import resolve_lr_schedule_args
+    hf_scheduler_type, hf_warmup_steps, tri_stage_args = resolve_lr_schedule_args(args, total_steps)
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
@@ -622,11 +643,9 @@ def main():
         gradient_accumulation_steps=args.grad_accum,
 
         # --- Learning rate schedule ---
-        # Cosine decay with linear warmup; LR ramps up over warmup_steps
-        # then decays following a cosine curve to near-zero
         learning_rate=args.lr,
-        lr_scheduler_type="cosine",
-        warmup_steps=args.warmup,
+        lr_scheduler_type=hf_scheduler_type,
+        warmup_steps=hf_warmup_steps,
         **epoch_or_steps_args,
 
         # --- Precision ---
@@ -707,6 +726,7 @@ def main():
         processor=processor,
         tokenizer=tokenizer,
         callbacks=callbacks,
+        tri_stage_args=tri_stage_args,
     )
 
     # -----------------------------------------------------------------------
