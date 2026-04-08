@@ -171,6 +171,10 @@ def parse_args():
         "--early_stopping_patience", type=int, default=0,
         help="0 = disabled (default).",
     )
+    parser.add_argument(
+        "--eval_base", action="store_true",
+        help="Evaluate the base model before training to establish a baseline.",
+    )
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--max_eval_samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -763,15 +767,15 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGQUIT, _signal_handler)
 
-    # Evaluate the base model before training to establish a baseline
-    print("Evaluating base model before training...")
-    base_metrics = trainer.evaluate(metric_key_prefix="base")
-    base_cer = base_metrics.get("base_cer_raw", None)
-    base_cer_norm = base_metrics.get("base_cer_nopunct", None)
-    if base_cer is not None:
-        print(f"  Base CER (raw):     {base_cer:.4f}")
-    if base_cer_norm is not None:
-        print(f"  Base CER (nopunct): {base_cer_norm:.4f}")
+    if args.eval_base:
+        print("Evaluating base model before training...")
+        base_metrics = trainer.evaluate(metric_key_prefix="base")
+        base_cer = base_metrics.get("base_cer_raw", None)
+        base_cer_norm = base_metrics.get("base_cer_nopunct", None)
+        if base_cer is not None:
+            print(f"  Base CER (raw):     {base_cer:.4f}")
+        if base_cer_norm is not None:
+            print(f"  Base CER (nopunct): {base_cer_norm:.4f}")
 
     print("Starting training...")
     trainer.train(
