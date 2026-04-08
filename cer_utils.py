@@ -76,13 +76,30 @@ def compute_cer(pred_list, label_list, cer_transform=None):
     result = {"cer_raw": cer_raw}
 
     # Normalized CER (punctuation removed, lowercased, whitespace normalized)
+    # Process in chunks to avoid memory issues with large eval sets,
+    # then aggregate edit-distance counters for an exact global CER.
     if cer_transform is not None:
-        output = jiwer.process_characters(
-            filtered_refs, filtered_preds,
-            reference_transform=cer_transform,
-            hypothesis_transform=cer_transform,
+        chunk_size = 500
+        total_hits = 0
+        total_subs = 0
+        total_ins = 0
+        total_dels = 0
+        for i in range(0, len(filtered_refs), chunk_size):
+            chunk_refs = filtered_refs[i:i + chunk_size]
+            chunk_preds = filtered_preds[i:i + chunk_size]
+            output = jiwer.process_characters(
+                chunk_refs, chunk_preds,
+                reference_transform=cer_transform,
+                hypothesis_transform=cer_transform,
+            )
+            total_hits += output.hits
+            total_subs += output.substitutions
+            total_ins += output.insertions
+            total_dels += output.deletions
+        total_ref_len = total_hits + total_subs + total_dels
+        result["cer_nopunct"] = (
+            (total_subs + total_ins + total_dels) / max(1, total_ref_len)
         )
-        result["cer_nopunct"] = output.cer
 
     return result, filtered_preds, filtered_refs
 
