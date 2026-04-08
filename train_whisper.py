@@ -154,7 +154,7 @@ def parse_args():
     from lr_schedule import add_lr_schedule_args
     add_lr_schedule_args(parser)
     parser.add_argument("--train_batch_size", type=int, default=4)
-    parser.add_argument("--eval_batch_size", type=int, default=None)
+    parser.add_argument("--eval_batch_size", type=int, default=64)
     parser.add_argument(
         "--eval_accumulation_steps", type=int, default=32,
         help="Number of eval batches to accumulate before offloading predictions "
@@ -639,7 +639,7 @@ def main():
         # --- Batch size and gradient accumulation ---
         # Effective batch = train_batch_size * grad_accum (per GPU)
         per_device_train_batch_size=args.train_batch_size,
-        per_device_eval_batch_size=args.eval_batch_size or args.train_batch_size,
+        per_device_eval_batch_size=args.eval_batch_size,
         gradient_accumulation_steps=args.grad_accum,
 
         # --- Learning rate schedule ---
@@ -804,8 +804,9 @@ def main():
         eval_test=True,
         eval_holdback=bool(args.holdback_tsv),
         language_full=args.language_full,
-        eval_batch_size=args.eval_batch_size or args.train_batch_size,
+        eval_batch_size=args.eval_batch_size,
         eval_accumulation_steps=args.eval_accumulation_steps,
+        dataloader_num_workers=4,
         nopunct_in_eval=args.nopunct_in_eval,
     )
 

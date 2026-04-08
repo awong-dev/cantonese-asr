@@ -90,8 +90,9 @@ def run_evaluation(
     eval_holdback=False,
     # --- Common options ---
     language_full="cantonese",
-    eval_batch_size=32,
+    eval_batch_size=64,
     eval_accumulation_steps=32,
+    dataloader_num_workers=4,
     nopunct_in_eval=False,
 ):
     """
@@ -266,7 +267,7 @@ def run_evaluation(
         generation_max_length=225,
         fp16=False,
         bf16=torch.cuda.is_available(),
-        dataloader_num_workers=4,
+        dataloader_num_workers=dataloader_num_workers,
         dataloader_pin_memory=True,
         remove_unused_columns=False,
         label_names=["labels"],
@@ -365,8 +366,9 @@ def main():
                         help="Comma-separated holdback TSV paths")
     parser.add_argument("--eval_holdback", action="store_true")
     parser.add_argument("--language_full", type=str, default="cantonese")
-    parser.add_argument("--eval_batch_size", type=int, default=32)
+    parser.add_argument("--eval_batch_size", type=int, default=64)
     parser.add_argument("--eval_accumulation_steps", type=int, default=32)
+    parser.add_argument("--dataloader_num_workers", type=int, default=4)
     parser.add_argument("--nopunct_in_eval", action="store_true")
     args = parser.parse_args()
 
@@ -392,6 +394,7 @@ def main():
         language_full=args.language_full,
         eval_batch_size=args.eval_batch_size,
         eval_accumulation_steps=args.eval_accumulation_steps,
+        dataloader_num_workers=args.dataloader_num_workers,
         nopunct_in_eval=args.nopunct_in_eval,
     )
 

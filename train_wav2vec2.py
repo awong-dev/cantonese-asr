@@ -119,8 +119,8 @@ def parse_args():
         help="Per-device train batch size",
     )
     parser.add_argument(
-        "--eval_batch_size", type=int, default=4,
-        help="Per-device eval batch size (default: 4)",
+        "--eval_batch_size", type=int, default=64,
+        help="Per-device eval batch size (default: 64)",
     )
     parser.add_argument(
         "--grad_accum", type=int, default=4,

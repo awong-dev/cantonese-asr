@@ -102,8 +102,9 @@ def run_evaluation(
     seed=None,
     eval_test=False,
     eval_holdback=False,
-    eval_batch_size=8,
+    eval_batch_size=64,
     eval_accumulation_steps=16,
+    dataloader_num_workers=4,
 ):
     """Evaluate a wav2vec2 model on test and/or holdback splits."""
 
@@ -240,7 +241,7 @@ def run_evaluation(
         eval_accumulation_steps=eval_accumulation_steps or None,
         fp16=False,
         bf16=torch.cuda.is_available(),
-        dataloader_num_workers=4,
+        dataloader_num_workers=dataloader_num_workers,
         dataloader_pin_memory=True,
         remove_unused_columns=False,
         report_to=[],
@@ -308,8 +309,9 @@ def main():
     parser.add_argument("--eval_test", action="store_true")
     parser.add_argument("--holdback_tsv", type=str, default=None)
     parser.add_argument("--eval_holdback", action="store_true")
-    parser.add_argument("--eval_batch_size", type=int, default=8)
+    parser.add_argument("--eval_batch_size", type=int, default=64)
     parser.add_argument("--eval_accumulation_steps", type=int, default=16)
+    parser.add_argument("--dataloader_num_workers", type=int, default=4)
     args = parser.parse_args()
 
     has_explicit = args.test_tsv is not None
@@ -332,6 +334,7 @@ def main():
         eval_holdback=args.eval_holdback,
         eval_batch_size=args.eval_batch_size,
         eval_accumulation_steps=args.eval_accumulation_steps,
+        dataloader_num_workers=args.dataloader_num_workers,
     )
 
 
