@@ -26,11 +26,10 @@ from typing import Any, Dict, List, Union
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 from torchcodec.decoders import AudioDecoder
 from datasets import load_dataset, concatenate_datasets
 from transformers import (
-    Trainer,
-    TrainingArguments,
     Wav2Vec2ForCTC,
     Wav2Vec2Processor,
 )
@@ -103,7 +102,6 @@ def run_evaluation(
     eval_test=False,
     eval_holdback=False,
     eval_batch_size=64,
-    eval_accumulation_steps=16,
     dataloader_num_workers=4,
 ):
     """Evaluate a wav2vec2 model on test and/or holdback splits."""
@@ -167,6 +165,11 @@ def run_evaluation(
     model = Wav2Vec2ForCTC.from_pretrained(model_path)
     model.eval()
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    use_bf16 = torch.cuda.is_available()
+    print(f"Device: {device}" + (", bf16 autocast" if use_bf16 else ""))
+
     # ---- Audio loading ----
     ds_paths = [p.strip() for p in dataset_path.split(",")] \
         if isinstance(dataset_path, str) else dataset_path
@@ -217,42 +220,66 @@ def run_evaluation(
     # ---- Preprocess ----
     processed = [(name, preprocess(ds, name)) for name, ds in all_eval]
 
-    # ---- Metrics ----
+    # ---- Evaluation loop ----
     _cer_transform = build_cer_transform()
+    data_collator = DataCollatorCTCWithPadding(processor=processor)
 
-    def compute_metrics(pred):
-        pred_logits = pred.predictions
-        pred_ids = np.argmax(pred_logits, axis=-1)
-        label_ids = pred.label_ids
-        label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
-        pred_str = processor.batch_decode(pred_ids)
-        label_str = processor.batch_decode(label_ids, group_tokens=False)
+    def evaluate_split(dataset, split_name):
+        """Run forward pass per batch, decode immediately, discard logits."""
+        dataloader = DataLoader(
+            dataset,
+            batch_size=eval_batch_size,
+            collate_fn=data_collator,
+            num_workers=dataloader_num_workers,
+            pin_memory=True,
+            shuffle=False,
+        )
+
+        all_pred_str = []
+        all_label_str = []
+        num_batches = (len(dataset) + eval_batch_size - 1) // eval_batch_size
+
+        for batch_idx, batch in enumerate(dataloader):
+            input_values = batch["input_values"].to(device)
+            attention_mask = batch.get("attention_mask")
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
+            labels = batch["labels"]  # keep on CPU
+
+            with torch.no_grad():
+                if use_bf16:
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        logits = model(
+                            input_values,
+                            attention_mask=attention_mask,
+                        ).logits
+                else:
+                    logits = model(
+                        input_values,
+                        attention_mask=attention_mask,
+                    ).logits
+
+            # Argmax and decode immediately — discard logits
+            pred_ids = torch.argmax(logits, dim=-1).cpu().numpy()
+            del logits
+
+            label_ids = labels.numpy().copy()
+            label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+
+            all_pred_str.extend(processor.batch_decode(pred_ids))
+            all_label_str.extend(
+                processor.batch_decode(label_ids, group_tokens=False)
+            )
+
+            if (batch_idx + 1) % 10 == 0 or batch_idx == num_batches - 1:
+                print(f"  [{split_name}] batch {batch_idx + 1}/{num_batches}")
+
+        # Compute CER on collected strings
         result, filtered_preds, filtered_refs = compute_cer(
-            pred_str, label_str, cer_transform=_cer_transform
+            all_pred_str, all_label_str, cer_transform=_cer_transform
         )
         print_examples(filtered_preds, filtered_refs)
         return result
-
-    # ---- Trainer for evaluation ----
-    data_collator = DataCollatorCTCWithPadding(processor=processor)
-    eval_args = TrainingArguments(
-        output_dir="/tmp/wav2vec2-eval",
-        per_device_eval_batch_size=eval_batch_size,
-        eval_accumulation_steps=eval_accumulation_steps or None,
-        fp16=False,
-        bf16=torch.cuda.is_available(),
-        dataloader_num_workers=dataloader_num_workers,
-        dataloader_pin_memory=True,
-        remove_unused_columns=False,
-        report_to=[],
-    )
-    trainer = Trainer(
-        model=model,
-        args=eval_args,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
-        processing_class=processor.feature_extractor,
-    )
 
     # ---- Run evaluations ----
     results = {}
@@ -263,14 +290,19 @@ def run_evaluation(
     for split_name, ds in processed:
         print(f"\nEvaluating on {split_name} ({len(ds)} samples)...")
         try:
-            metrics = trainer.evaluate(eval_dataset=ds, metric_key_prefix=split_name)
-            cer_raw = metrics.get(f"{split_name}_cer_raw", None)
-            cer_nopunct = metrics.get(f"{split_name}_cer_nopunct", None)
+            metrics = evaluate_split(ds, split_name)
+            cer_raw = metrics.get("cer_raw", None)
+            cer_nopunct = metrics.get("cer_nopunct", None)
             if cer_raw is not None:
                 print(f"  {split_name} CER (raw):     {cer_raw:.4f}")
             if cer_nopunct is not None:
                 print(f"  {split_name} CER (nopunct): {cer_nopunct:.4f}")
-            results[split_name] = metrics
+            # Store with prefixed keys for consistent summary format
+            results[split_name] = {
+                f"{split_name}_cer_raw": cer_raw,
+            }
+            if cer_nopunct is not None:
+                results[split_name][f"{split_name}_cer_nopunct"] = cer_nopunct
         except Exception as e:
             print(f"  {split_name} evaluation failed: {e}")
 
@@ -310,7 +342,6 @@ def main():
     parser.add_argument("--holdback_tsv", type=str, default=None)
     parser.add_argument("--eval_holdback", action="store_true")
     parser.add_argument("--eval_batch_size", type=int, default=64)
-    parser.add_argument("--eval_accumulation_steps", type=int, default=16)
     parser.add_argument("--dataloader_num_workers", type=int, default=4)
     args = parser.parse_args()
 
@@ -333,7 +364,6 @@ def main():
         eval_test=args.eval_test or has_explicit,
         eval_holdback=args.eval_holdback,
         eval_batch_size=args.eval_batch_size,
-        eval_accumulation_steps=args.eval_accumulation_steps,
         dataloader_num_workers=args.dataloader_num_workers,
     )
 
