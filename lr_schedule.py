@@ -3,11 +3,15 @@ Shared LR schedule utilities for ASR training scripts.
 
 Provides:
 - get_tri_stage_schedule: fairseq-style warmup/hold/decay LR schedule
+- TriStageCheckpointCallback: saves a checkpoint before the decay phase begins
 - add_lr_schedule_args: argparse helper for LR schedule options
 - resolve_lr_schedule_args: resolve args into HF scheduler config + tri_stage params
 """
 
+import os
+
 from torch.optim.lr_scheduler import LambdaLR
+from transformers import TrainerCallback
 
 
 def get_tri_stage_schedule(
@@ -51,6 +55,39 @@ def get_tri_stage_schedule(
             return max(final_lr_scale, 1.0 - (1.0 - final_lr_scale) * decay_progress)
 
     return LambdaLR(optimizer, lr_lambda)
+
+
+class TriStageCheckpointCallback(TrainerCallback):
+    """Save a checkpoint at the end of the hold phase, before decay begins.
+
+    This preserves the model at peak LR before the decay phase reduces it.
+    Saved to {output_dir}/pre-decay/ which is outside the Trainer's normal
+    checkpoint rotation, so it won't be deleted by save_total_limit.
+
+    After constructing the Trainer, set callback.trainer = trainer so the
+    callback can call save_model() directly.
+    """
+
+    def __init__(self, num_training_steps, warmup_pct, hold_pct):
+        self.decay_start_step = int(
+            num_training_steps * (warmup_pct + hold_pct)
+        )
+        self.saved = False
+        self.trainer = None  # set by caller after Trainer construction
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        print(f"Tri-stage: will save pre-decay checkpoint at step {self.decay_start_step}")
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if not self.saved and state.global_step >= self.decay_start_step:
+            self.saved = True
+            save_dir = os.path.join(args.output_dir, "pre-decay")
+            print(f"\n{'=' * 60}")
+            print(f"Tri-stage: saving pre-decay checkpoint at step {state.global_step}")
+            print(f"  -> {save_dir}")
+            print(f"{'=' * 60}")
+            if self.trainer is not None:
+                self.trainer.save_model(save_dir)
 
 
 def add_lr_schedule_args(parser):

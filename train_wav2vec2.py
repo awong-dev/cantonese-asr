@@ -657,6 +657,21 @@ def main():
                 return self.lr_scheduler
             return super().create_scheduler(num_training_steps, optimizer)
 
+    callbacks = [
+        EarlyStoppingCallback(
+            early_stopping_patience=args.early_stopping_patience,
+        ),
+    ]
+    tri_stage_cb = None
+    if tri_stage_args is not None:
+        from lr_schedule import TriStageCheckpointCallback
+        tri_stage_cb = TriStageCheckpointCallback(
+            num_training_steps=tri_stage_args["num_training_steps"],
+            warmup_pct=tri_stage_args["warmup_pct"],
+            hold_pct=tri_stage_args["hold_pct"],
+        )
+        callbacks.append(tri_stage_cb)
+
     trainer = ConfiguredTrainer(
         model=model,
         args=training_args,
@@ -665,12 +680,10 @@ def main():
         data_collator=data_collator,
         compute_metrics=compute_metrics,
         processing_class=processor.feature_extractor,
-        callbacks=[
-            EarlyStoppingCallback(
-                early_stopping_patience=args.early_stopping_patience,
-            ),
-        ],
+        callbacks=callbacks,
     )
+    if tri_stage_cb is not None:
+        tri_stage_cb.trainer = trainer
 
     # -----------------------------------------------------------------------
     # 14. Train

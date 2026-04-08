@@ -713,6 +713,15 @@ def main():
                 early_stopping_patience=args.early_stopping_patience
             )
         )
+    tri_stage_cb = None
+    if tri_stage_args is not None:
+        from lr_schedule import TriStageCheckpointCallback
+        tri_stage_cb = TriStageCheckpointCallback(
+            num_training_steps=tri_stage_args["num_training_steps"],
+            warmup_pct=tri_stage_args["warmup_pct"],
+            hold_pct=tri_stage_args["hold_pct"],
+        )
+        callbacks.append(tri_stage_cb)
 
     trainer = DifferentialLRTrainer(
         model=model,
@@ -728,6 +737,8 @@ def main():
         callbacks=callbacks,
         tri_stage_args=tri_stage_args,
     )
+    if tri_stage_cb is not None:
+        tri_stage_cb.trainer = trainer
 
     # -----------------------------------------------------------------------
     # 12. Train
