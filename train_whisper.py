@@ -769,13 +769,22 @@ def main():
 
     if args.eval_base:
         print("Evaluating base model before training...")
-        base_metrics = trainer.evaluate(metric_key_prefix="base")
-        base_cer = base_metrics.get("base_cer_raw", None)
-        base_cer_norm = base_metrics.get("base_cer_nopunct", None)
-        if base_cer is not None:
-            print(f"  Base CER (raw):     {base_cer:.4f}")
-        if base_cer_norm is not None:
-            print(f"  Base CER (nopunct): {base_cer_norm:.4f}")
+        from eval_whisper import run_evaluation as run_eval_base
+        run_eval_base(
+            model_path=args.model,
+            dataset_path=args.dataset_path,
+            all_tsv=args.all_tsv,
+            holdback_tsv=args.holdback_tsv if args.holdback_tsv else None,
+            pct_validation=args.pct_validation,
+            pct_test=args.pct_test,
+            seed=args.seed,
+            eval_test=True,
+            eval_holdback=bool(args.holdback_tsv),
+            language_full=args.language_full,
+            eval_batch_size=args.eval_batch_size,
+            dataloader_num_workers=4,
+            nopunct_in_eval=args.nopunct_in_eval,
+        )
 
     print("Starting training...")
     trainer.train(
