@@ -20,10 +20,23 @@ Requires Python 3.10+ and a CUDA GPU for training (bf16 is used when available).
 
 ```bash
 python3 train_whisper.py \
-    --dataset_path data/cv-corpus-25.0/yue \
-    --model openai/whisper-large-v3-turbo \
-    --lr 1e-5 --epochs 10 --warmup 500 \
-    --train_batch_size 4 --grad_accum 4
+    --model openai/whisper-large-v3 \
+    --dataset_path cv-corpus-25.0-2026-03-09/yue \
+    --all_tsv validated.tsv \
+    --holdback_tsv test.tsv \
+    --pct_validation 0.005 --pct_test 0.05 \
+    --freeze_encoder \
+    --lr 1e-7 \
+    --lr_schedule tri_stage \
+    --tri_stage_warmup_pct 0.07 --tri_stage_hold_pct 0.6 \
+    --epochs 15 \
+    --train_batch_size 8 --eval_batch_size 96 \
+    --eval_accumulation_steps 64 --grad_accum 2 \
+    --eval_steps 2000 --save_steps 2000 \
+    --dropout 0.1 --attention_dropout 0.1 \
+    --nopunct_in_eval \
+    --output_dir ./whisper-large-v3-yue-tristage \
+    --seed 42
 ```
 
 Key options:

@@ -816,7 +816,6 @@ def main():
         eval_holdback=bool(args.holdback_tsv),
         language_full=args.language_full,
         eval_batch_size=args.eval_batch_size,
-        eval_accumulation_steps=args.eval_accumulation_steps,
         dataloader_num_workers=4,
         nopunct_in_eval=args.nopunct_in_eval,
     )

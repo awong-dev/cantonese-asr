@@ -33,11 +33,10 @@ from typing import Any, Dict, List, Union
 
 import torch
 import numpy as np
+from torch.utils.data import DataLoader
 from torchcodec.decoders import AudioDecoder
 from datasets import load_dataset, concatenate_datasets
 from transformers import (
-    Seq2SeqTrainer,
-    Seq2SeqTrainingArguments,
     WhisperFeatureExtractor,
     WhisperForConditionalGeneration,
     WhisperProcessor,
@@ -91,7 +90,6 @@ def run_evaluation(
     # --- Common options ---
     language_full="cantonese",
     eval_batch_size=64,
-    eval_accumulation_steps=32,
     dataloader_num_workers=4,
     nopunct_in_eval=False,
 ):
@@ -175,6 +173,11 @@ def run_evaluation(
     model = WhisperForConditionalGeneration.from_pretrained(model_path)
     model.eval()
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    use_bf16 = torch.cuda.is_available()
+    print(f"Device: {device}" + (", bf16 autocast" if use_bf16 else ""))
+
     # ---- Audio loading (uses clips_dir column if present, else infers) ----
     ds_paths = [p.strip() for p in dataset_path.split(",")] \
         if isinstance(dataset_path, str) else dataset_path
@@ -224,85 +227,97 @@ def run_evaluation(
     for name, ds in all_eval:
         processed.append((name, preprocess(ds, name)))
 
-    # ---- Metrics ----
+    # ---- Evaluation loop ----
     from cer_utils import build_cer_transform, compute_cer, print_examples
 
     _cer_transform = build_cer_transform() if nopunct_in_eval else None
+    data_collator = DataCollatorSpeechSeq2SeqWithPadding(
+        processor=processor,
+        decoder_start_token_id=model.config.decoder_start_token_id,
+    )
 
     # Store all predictions/references for combined CER
     all_preds = []
     all_refs = []
 
-    def compute_metrics(pred):
-        pred_ids = pred.predictions
-        label_ids = pred.label_ids
-        if isinstance(pred_ids, tuple):
-            pred_ids = pred_ids[0]
-        label_ids = np.where(label_ids == -100, tokenizer.pad_token_id, label_ids)
-        pred_ids = np.where(pred_ids == -100, tokenizer.pad_token_id, pred_ids)
-        pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-        label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-
-        result, filtered_preds, filtered_refs = compute_cer(
-            pred_str, label_str, cer_transform=_cer_transform
+    def evaluate_split(dataset, split_name):
+        """Run generate() per batch, decode immediately, discard logits."""
+        dataloader = DataLoader(
+            dataset,
+            batch_size=eval_batch_size,
+            collate_fn=data_collator,
+            num_workers=dataloader_num_workers,
+            pin_memory=True,
+            shuffle=False,
         )
 
-        # Accumulate for combined CER
+        all_pred_str = []
+        all_label_str = []
+        num_batches = (len(dataset) + eval_batch_size - 1) // eval_batch_size
+
+        for batch_idx, batch in enumerate(dataloader):
+            input_features = batch["input_features"].to(device)
+            labels = batch["labels"]  # keep on CPU
+
+            with torch.no_grad():
+                if use_bf16:
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        predicted_ids = model.generate(input_features)
+                else:
+                    predicted_ids = model.generate(input_features)
+
+            # Decode immediately — discard generated token IDs
+            pred_ids = predicted_ids.cpu().numpy()
+            del predicted_ids
+
+            label_ids = labels.numpy().copy()
+            label_ids = np.where(label_ids == -100, tokenizer.pad_token_id, label_ids)
+
+            all_pred_str.extend(
+                tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+            )
+            all_label_str.extend(
+                tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+            )
+
+            if (batch_idx + 1) % 10 == 0 or batch_idx == num_batches - 1:
+                print(f"  [{split_name}] batch {batch_idx + 1}/{num_batches}")
+
+        # Compute CER on collected strings
+        result, filtered_preds, filtered_refs = compute_cer(
+            all_pred_str, all_label_str, cer_transform=_cer_transform
+        )
+
+        # Accumulate for combined CER across splits
         all_preds.extend(filtered_preds)
         all_refs.extend(filtered_refs)
 
         print_examples(filtered_preds, filtered_refs)
         return result
 
-    # ---- Trainer for evaluation ----
-    data_collator = DataCollatorSpeechSeq2SeqWithPadding(
-        processor=processor,
-        decoder_start_token_id=model.config.decoder_start_token_id,
-    )
-    eval_args = Seq2SeqTrainingArguments(
-        output_dir="/tmp/whisper-eval",
-        per_device_eval_batch_size=eval_batch_size,
-        eval_accumulation_steps=eval_accumulation_steps,
-        predict_with_generate=True,
-        generation_max_length=225,
-        fp16=False,
-        bf16=torch.cuda.is_available(),
-        dataloader_num_workers=dataloader_num_workers,
-        dataloader_pin_memory=True,
-        remove_unused_columns=False,
-        label_names=["labels"],
-        report_to=[],
-    )
-    trainer = Seq2SeqTrainer(
-        model=model,
-        args=eval_args,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics,
-        processing_class=processor.feature_extractor,
-    )
-
     # ---- Run evaluations ----
-    def evaluate_split(dataset, split_name):
-        print(f"\nEvaluating on {split_name} ({len(dataset)} samples)...")
-        metrics = trainer.evaluate(eval_dataset=dataset, metric_key_prefix=split_name)
-        cer = metrics.get(f"{split_name}_cer_raw", None)
-        cer_norm = metrics.get(f"{split_name}_cer_nopunct", None)
-        loss = metrics.get(f"{split_name}_loss", None)
-        if cer is not None:
-            print(f"  {split_name} CER (raw):     {cer:.4f}")
-        if cer_norm is not None:
-            print(f"  {split_name} CER (nopunct): {cer_norm:.4f}")
-        if loss is not None:
-            print(f"  {split_name} Loss:           {loss:.4f}")
-        return metrics
-
     results = {}
     print("\n" + "=" * 60)
     print("EVALUATION")
     print("=" * 60)
 
-    for name, ds in processed:
-        results[name] = evaluate_split(ds, name)
+    for split_name, ds in processed:
+        print(f"\nEvaluating on {split_name} ({len(ds)} samples)...")
+        try:
+            metrics = evaluate_split(ds, split_name)
+            cer_raw = metrics.get("cer_raw", None)
+            cer_nopunct = metrics.get("cer_nopunct", None)
+            if cer_raw is not None:
+                print(f"  {split_name} CER (raw):     {cer_raw:.4f}")
+            if cer_nopunct is not None:
+                print(f"  {split_name} CER (nopunct): {cer_nopunct:.4f}")
+            results[split_name] = {
+                f"{split_name}_cer_raw": cer_raw,
+            }
+            if cer_nopunct is not None:
+                results[split_name][f"{split_name}_cer_nopunct"] = cer_nopunct
+        except Exception as e:
+            print(f"  {split_name} evaluation failed: {e}")
 
     # ---- Combined CER (if multiple test splits) ----
     test_results = {k: v for k, v in results.items() if k.startswith("test_")}
@@ -367,7 +382,6 @@ def main():
     parser.add_argument("--eval_holdback", action="store_true")
     parser.add_argument("--language_full", type=str, default="cantonese")
     parser.add_argument("--eval_batch_size", type=int, default=64)
-    parser.add_argument("--eval_accumulation_steps", type=int, default=32)
     parser.add_argument("--dataloader_num_workers", type=int, default=4)
     parser.add_argument("--nopunct_in_eval", action="store_true")
     args = parser.parse_args()
@@ -393,7 +407,6 @@ def main():
         eval_holdback=args.eval_holdback,
         language_full=args.language_full,
         eval_batch_size=args.eval_batch_size,
-        eval_accumulation_steps=args.eval_accumulation_steps,
         dataloader_num_workers=args.dataloader_num_workers,
         nopunct_in_eval=args.nopunct_in_eval,
     )
