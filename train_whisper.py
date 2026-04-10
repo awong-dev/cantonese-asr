@@ -144,6 +144,13 @@ def parse_args():
         help="Merge LoRA weights into base model when saving.",
     )
 
+    # Performance
+    parser.add_argument(
+        "--no_gradient_checkpointing", action="store_true",
+        help="Disable gradient checkpointing. Faster training but uses more VRAM. "
+             "Recommended with LoRA where most parameters are frozen.",
+    )
+
     # Regularization
     parser.add_argument("--attention_dropout", type=float, default=0.0)
     parser.add_argument("--dropout", type=float, default=0.0)
@@ -527,13 +534,16 @@ def main():
     # instead of hardcoded forced_decoder_ids (which can conflict with training)
     model.generation_config.forced_decoder_ids = None
 
-    # Enable gradient checkpointing to reduce VRAM usage (~30% savings).
-    # use_reentrant=False is required for compatibility with partially frozen
-    # models in newer PyTorch (avoids "backward through graph a second time" error)
+    # Gradient checkpointing trades compute for VRAM (~30% savings but slower).
+    # Disable with --no_gradient_checkpointing (recommended for LoRA).
     model.config.use_cache = False
-    model.gradient_checkpointing_enable(
-        gradient_checkpointing_kwargs={"use_reentrant": False}
-    )
+    if not args.no_gradient_checkpointing:
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        print("Gradient checkpointing: enabled")
+    else:
+        print("Gradient checkpointing: disabled")
 
     # --- Encoder freeze/unfreeze ---
     # Three modes: fully frozen, partially unfrozen (last N layers), or fully unfrozen
