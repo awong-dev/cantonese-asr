@@ -600,12 +600,13 @@ def main():
         )
         model = get_peft_model(model, lora_config)
 
-        # Patch: peft's PeftModelForSeq2SeqLM.forward() generates input_ids
-        # from labels and passes it to the base Whisper model, which doesn't
-        # accept it. Wrap the base model's forward to silently drop input_ids.
+        # Patch: peft's PeftModelForSeq2SeqLM.forward() injects kwargs like
+        # input_ids and inputs_embeds that Whisper's forward() doesn't accept.
+        # Filter to only the keys Whisper actually supports.
         _orig_forward = model.base_model.model.forward
+        _valid_keys = DifferentialLRTrainer._WHISPER_FORWARD_KEYS
         def _patched_forward(*args, **kwargs):
-            kwargs.pop("input_ids", None)
+            kwargs = {k: v for k, v in kwargs.items() if k in _valid_keys}
             return _orig_forward(*args, **kwargs)
         model.base_model.model.forward = _patched_forward
 
