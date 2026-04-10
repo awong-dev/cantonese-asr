@@ -302,11 +302,18 @@ class DifferentialLRTrainer(Seq2SeqTrainer):
             self._whisper_tokenizer.save_pretrained(output_dir)
 
     def compute_loss(self, model, inputs, num_items_in_batch=None, return_outputs=False):
-        # Strip keys Whisper doesn't accept (e.g. input_ids injected by peft)
-        inputs = {
-            k: v for k, v in inputs.items()
-            if k in self._WHISPER_FORWARD_KEYS
-        }
+        # Strip keys Whisper doesn't accept (e.g. input_ids injected by peft).
+        # When peft wraps the model, its forward() injects input_ids internally,
+        # so we must filter at the base model level, not the peft wrapper level.
+        import peft
+        if isinstance(model, peft.PeftModel):
+            # Let peft handle its own kwargs — only pass what the collator produced
+            inputs = {k: v for k, v in inputs.items() if k != "input_ids"}
+        else:
+            inputs = {
+                k: v for k, v in inputs.items()
+                if k in self._WHISPER_FORWARD_KEYS
+            }
         outputs = model(**inputs)
         loss = outputs.loss
         return (loss, outputs) if return_outputs else loss
