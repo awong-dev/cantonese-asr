@@ -130,7 +130,8 @@ def parse_args():
         "--lora_dropout", type=float, default=0.05, help="LoRA dropout (default: 0.05)",
     )
     parser.add_argument(
-        "--lora_target_modules", type=str, nargs="+", default=None,
+        "--lora_modules", type=str, nargs="+", default=None,
+        dest="lora_target_modules",
         help="Modules to apply LoRA to (default: all attention + FFN projections)",
     )
     parser.add_argument(
