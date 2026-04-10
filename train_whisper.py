@@ -134,6 +134,11 @@ def parse_args():
         help="Modules to apply LoRA to (default: all attention + FFN projections)",
     )
     parser.add_argument(
+        "--lora_target", type=str, default="both",
+        choices=["encoder", "decoder", "both"],
+        help="Apply LoRA to encoder, decoder, or both (default: both)",
+    )
+    parser.add_argument(
         "--lora_merge_on_save", action="store_true",
         help="Merge LoRA weights into base model when saving.",
     )
@@ -570,9 +575,15 @@ def main():
     if args.lora:
         from peft import LoraConfig, get_peft_model, TaskType
 
-        target_modules = args.lora_target_modules or [
-            "q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2",
-        ]
+        if args.lora_target_modules:
+            target_modules = args.lora_target_modules
+        else:
+            base_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
+            if args.lora_target == "both":
+                target_modules = base_modules
+            else:
+                prefix = f"model.{args.lora_target}"
+                target_modules = [f"{prefix}.*{m}" for m in base_modules]
         lora_config = LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
@@ -582,7 +593,7 @@ def main():
         )
         model = get_peft_model(model, lora_config)
         print(f"LoRA applied (r={args.lora_r}, alpha={args.lora_alpha}, "
-              f"dropout={args.lora_dropout})")
+              f"dropout={args.lora_dropout}, target={args.lora_target})")
         print(f"  Target modules: {target_modules}")
         model.print_trainable_parameters()
     else:
@@ -724,9 +735,7 @@ def main():
     # -----------------------------------------------------------------------
     # Enable differential LR only when encoder is unfrozen with a separate LR
     # and LoRA is not active (peft manages its own trainable params)
-    encoder_lr = None
-    if not args.lora and not args.freeze_encoder and args.encoder_lr:
-        encoder_lr = args.encoder_lr
+    encoder_lr = args.encoder_lr if (args.encoder_lr and not args.freeze_encoder) else None
 
     callbacks = []
     if args.early_stopping_patience > 0:
