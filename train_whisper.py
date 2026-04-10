@@ -579,12 +579,16 @@ def main():
         if args.lora_target_modules:
             target_modules = args.lora_target_modules
         else:
-            base_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
+            base_modules = {"q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"}
             if args.lora_target == "both":
-                target_modules = base_modules
+                target_modules = sorted(base_modules)
             else:
-                prefix = f"model\\.{args.lora_target}\\."
-                target_modules = [f"{prefix}.*{m}" for m in base_modules]
+                # Enumerate matching module names from the model directly
+                prefix = f"model.{args.lora_target}."
+                target_modules = sorted(
+                    name for name, _ in model.named_modules()
+                    if name.startswith(prefix) and name.split(".")[-1] in base_modules
+                )
         lora_config = LoraConfig(
             r=args.lora_r,
             lora_alpha=args.lora_alpha,
