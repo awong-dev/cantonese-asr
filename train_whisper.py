@@ -301,13 +301,15 @@ class DifferentialLRTrainer(Seq2SeqTrainer):
         if output_dir and self._whisper_tokenizer is not None:
             self._whisper_tokenizer.save_pretrained(output_dir)
 
-    def compute_loss(self, model, inputs, *args, **kwargs):
+    def compute_loss(self, model, inputs, num_items_in_batch=None, return_outputs=False):
         # Strip keys Whisper doesn't accept (e.g. input_ids injected by peft)
         inputs = {
             k: v for k, v in inputs.items()
             if k in self._WHISPER_FORWARD_KEYS
         }
-        return super().compute_loss(model, inputs, *args, **kwargs)
+        outputs = model(**inputs)
+        loss = outputs.loss
+        return (loss, outputs) if return_outputs else loss
 
     def create_optimizer(self):
         if self.optimizer is not None:
