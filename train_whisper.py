@@ -817,26 +817,6 @@ def main():
     # -----------------------------------------------------------------------
     # 12. Train
     # -----------------------------------------------------------------------
-    # Register signal handlers to save model/tokenizer/processor on interrupt.
-    # This ensures checkpoints are usable even if training is killed mid-run.
-    import signal
-
-    def _signal_handler(signum, frame):
-        sig_name = signal.Signals(signum).name
-        print(f"\n{'=' * 60}")
-        print(f"Caught {sig_name} — saving emergency checkpoint...")
-        print(f"{'=' * 60}")
-        emergency_dir = os.path.join(args.output_dir, "interrupted")
-        os.makedirs(emergency_dir, exist_ok=True)
-        trainer.save_model(emergency_dir)
-        processor.save_pretrained(emergency_dir)
-        tokenizer.save_pretrained(emergency_dir)
-        print(f"Emergency checkpoint saved to {emergency_dir}")
-        raise SystemExit(1)
-
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGQUIT, _signal_handler)
-
     if args.eval_base:
         print("Evaluating base model before training...")
         from eval_whisper import run_evaluation as run_eval_base
