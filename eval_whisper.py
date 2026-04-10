@@ -91,7 +91,7 @@ def run_evaluation(
     language_full="cantonese",
     eval_batch_size=64,
     dataloader_num_workers=4,
-    nopunct_in_eval=False,
+    nopunct_in_eval=True,
     no_cache=True,
     results_json=None,
 ):
@@ -248,7 +248,7 @@ def run_evaluation(
     # ---- Evaluation loop ----
     from cer_utils import build_cer_transform, compute_cer, print_examples
 
-    _cer_transform = build_cer_transform() if nopunct_in_eval else None
+    _cer_transform = build_cer_transform()
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(
         processor=processor,
         decoder_start_token_id=model.config.decoder_start_token_id,
