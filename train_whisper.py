@@ -583,7 +583,7 @@ def main():
             if args.lora_target == "both":
                 target_modules = base_modules
             else:
-                prefix = f"model.{args.lora_target}"
+                prefix = f"model\\.{args.lora_target}\\."
                 target_modules = [f"{prefix}.*{m}" for m in base_modules]
         lora_config = LoraConfig(
             r=args.lora_r,
