@@ -101,6 +101,10 @@ def parse_args():
         help="Path to trainer_state.json (auto-detected from model_path if not set)",
     )
     parser.add_argument(
+        "--eval_results_json", type=str, default=None,
+        help="Path to eval_results.json (auto-detected from model_path if not set)",
+    )
+    parser.add_argument(
         "--private", action="store_true",
         help="Make the repository private",
     )
@@ -248,7 +252,8 @@ def detect_model_type(model_path: Path) -> str:
     return "unknown"
 
 
-def generate_model_card(args, stats: dict | None, model_type: str, has_runs: bool = False) -> str:
+def generate_model_card(args, stats: dict | None, model_type: str,
+                        has_runs: bool = False, eval_results: dict | None = None) -> str:
     """Generate a HuggingFace model card (README.md)."""
     repo_id = f"{args.username}/{args.repo_name}"
 
@@ -390,6 +395,22 @@ def generate_model_card(args, stats: dict | None, model_type: str, has_runs: boo
                 loss_str = f"{entry['eval_loss']:.4f}" if entry.get("eval_loss") else "-"
                 cer_str = f"{entry['eval_cer_raw']:.2%}" if entry.get("eval_cer_raw") is not None else "-"
                 md_lines.append(f"| {entry.get('step', '-')} | {epoch_str} | {loss_str} | {cer_str} |")
+
+    # Final evaluation results from eval_results.json
+    if eval_results:
+        md_lines.extend([
+            "",
+            "### Final Evaluation",
+            "",
+            "| Split | CER (raw) | CER (nopunct) |",
+            "|-------|-----------|---------------|",
+        ])
+        for split_name, metrics in eval_results.items():
+            cer_raw = metrics.get(f"{split_name}_cer_raw")
+            cer_np = metrics.get(f"{split_name}_cer_nopunct")
+            raw_str = f"{cer_raw:.2%}" if cer_raw is not None else "-"
+            np_str = f"{cer_np:.2%}" if cer_np is not None else "-"
+            md_lines.append(f"| {split_name} | {raw_str} | {np_str} |")
 
     # Training details
     md_lines.extend([
@@ -565,6 +586,31 @@ def main():
     else:
         print("No trainer_state.json found — using manual --cer if provided")
 
+    # Look for eval_results.json (written by eval scripts after training)
+    eval_results = None
+    eval_results_path = args.eval_results_json
+    if eval_results_path is None:
+        for candidate in [
+            model_path / "eval_results.json",
+            model_path.parent / "eval_results.json",
+        ]:
+            if candidate.exists():
+                eval_results_path = str(candidate)
+                break
+    if eval_results_path and Path(eval_results_path).exists():
+        print(f"Found eval_results: {eval_results_path}")
+        with open(eval_results_path) as f:
+            eval_results = json.load(f)
+        for split_name, metrics in eval_results.items():
+            cer_raw = metrics.get(f"{split_name}_cer_raw")
+            cer_np = metrics.get(f"{split_name}_cer_nopunct")
+            parts = [f"{split_name}:"]
+            if cer_raw is not None:
+                parts.append(f"CER={cer_raw:.4f}")
+            if cer_np is not None:
+                parts.append(f"CER(nopunct)={cer_np:.4f}")
+            print(f"  {' '.join(parts)}")
+
     # Find TensorBoard runs directory
     runs_dir = None
     if not args.no_runs:
@@ -582,7 +628,11 @@ def main():
             print("No TensorBoard runs directory found (use --runs_dir to specify)")
 
     # Generate model card
-    model_card = generate_model_card(args, stats, model_type, has_runs=runs_dir is not None)
+    model_card = generate_model_card(
+        args, stats, model_type,
+        has_runs=runs_dir is not None,
+        eval_results=eval_results,
+    )
     readme_path = model_path / "README.md"
     with open(readme_path, "w") as f:
         f.write(model_card)

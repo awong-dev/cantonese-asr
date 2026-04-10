@@ -103,6 +103,7 @@ def run_evaluation(
     eval_holdback=False,
     eval_batch_size=64,
     dataloader_num_workers=4,
+    results_json=None,
 ):
     """Evaluate a wav2vec2 model on test and/or holdback splits."""
 
@@ -320,6 +321,13 @@ def run_evaluation(
             print(line)
     print("=" * 60)
 
+    if results_json:
+        import json
+        os.makedirs(os.path.dirname(results_json) or ".", exist_ok=True)
+        with open(results_json, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults written to {results_json}")
+
     return results
 
 
@@ -343,6 +351,8 @@ def main():
     parser.add_argument("--eval_holdback", action="store_true")
     parser.add_argument("--eval_batch_size", type=int, default=64)
     parser.add_argument("--dataloader_num_workers", type=int, default=4)
+    parser.add_argument("--results_json", type=str, default=None,
+                        help="Write results to this JSON file")
     args = parser.parse_args()
 
     has_explicit = args.test_tsv is not None
@@ -365,6 +375,7 @@ def main():
         eval_holdback=args.eval_holdback,
         eval_batch_size=args.eval_batch_size,
         dataloader_num_workers=args.dataloader_num_workers,
+        results_json=args.results_json,
     )
 
 

@@ -184,6 +184,12 @@ def parse_args():
              "Normalization uses a jiwer pipeline that removes punctuation, "
              "lowercases, and normalizes whitespace before computing CER.",
     )
+    parser.add_argument(
+        "--best_model_metric", type=str, default=None,
+        choices=["cer_raw", "cer_nopunct"],
+        help="Metric for checkpoint selection. Defaults to cer_nopunct when "
+             "--nopunct_in_eval is set, cer_raw otherwise.",
+    )
 
     # Streaming / caching
     parser.add_argument(
@@ -349,6 +355,15 @@ class DifferentialLRTrainer(Seq2SeqTrainer):
 # ---------------------------------------------------------------------------
 def main():
     args = parse_args()
+
+    # Guard against accidentally overwriting a previous run
+    if os.path.isdir(args.output_dir) and not args.resume_from_checkpoint:
+        contents = os.listdir(args.output_dir)
+        if any(c.startswith("checkpoint-") for c in contents):
+            raise SystemExit(
+                f"Error: output_dir '{args.output_dir}' already contains checkpoints. "
+                f"Use --resume_from_checkpoint to continue, or choose a different --output_dir."
+            )
 
     if args.cache_dir:
         os.environ["HF_DATASETS_CACHE"] = args.cache_dir
@@ -637,6 +652,11 @@ def main():
     from lr_schedule import resolve_lr_schedule_args
     hf_scheduler_type, hf_warmup_steps, tri_stage_args = resolve_lr_schedule_args(args, total_steps)
 
+    best_model_metric = args.best_model_metric
+    if best_model_metric is None:
+        best_model_metric = "cer_nopunct" if args.nopunct_in_eval else "cer_raw"
+    print(f"Checkpoint selection metric: {best_model_metric}")
+
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
 
@@ -677,13 +697,11 @@ def main():
 
         # --- Checkpointing ---
         # Keep the 3 most recent checkpoints; load the best one (by CER) at end.
-        # When --nopunct_in_eval is set, use normalized CER (punctuation/case removed)
-        # for checkpoint selection instead of raw CER.
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=3,
         load_best_model_at_end=True,
-        metric_for_best_model="cer_nopunct" if args.nopunct_in_eval else "cer_raw",
+        metric_for_best_model=best_model_metric,
         greater_is_better=False,  # lower CER = better
 
         # --- Performance ---
@@ -831,6 +849,7 @@ def main():
         eval_batch_size=args.eval_batch_size,
         dataloader_num_workers=4,
         nopunct_in_eval=args.nopunct_in_eval,
+        results_json=os.path.join(args.output_dir, "eval_results.json"),
     )
 
     print("\nDone!")

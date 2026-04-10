@@ -268,6 +268,15 @@ class CTCTrainer(Trainer):
 def main():
     args = parse_args()
 
+    # Guard against accidentally overwriting a previous run
+    if os.path.isdir(args.output_dir) and not args.resume_from_checkpoint:
+        contents = os.listdir(args.output_dir)
+        if any(c.startswith("checkpoint-") for c in contents):
+            raise SystemExit(
+                f"Error: output_dir '{args.output_dir}' already contains checkpoints. "
+                f"Use --resume_from_checkpoint to continue, or choose a different --output_dir."
+            )
+
     # Set HF cache directory if specified
     if args.cache_dir:
         os.environ["HF_DATASETS_CACHE"] = args.cache_dir
@@ -712,7 +721,10 @@ def main():
             name, hb_prep = item
             eval_splits.append((f"holdback_{name}", hb_prep))
 
-    all_results = evaluate_and_summarize(trainer, eval_splits)
+    all_results = evaluate_and_summarize(
+        trainer, eval_splits,
+        results_json=os.path.join(args.output_dir, "eval_results.json"),
+    )
 
     print("\nDone!")
 

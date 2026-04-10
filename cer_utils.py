@@ -134,7 +134,7 @@ def print_examples(pred_list, label_list, num_stable=3, num_random=3):
             print()
 
 
-def evaluate_and_summarize(trainer, eval_splits):
+def evaluate_and_summarize(trainer, eval_splits, results_json=None):
     """
     Run evaluation on multiple (name, dataset) pairs and print a summary.
 
@@ -187,5 +187,13 @@ def evaluate_and_summarize(trainer, eval_splits):
                 line += f"  (nopunct: {cer_nopunct:.4f})"
             print(line)
     print("=" * 60)
+
+    if results_json:
+        import json
+        import os
+        os.makedirs(os.path.dirname(results_json) or ".", exist_ok=True)
+        with open(results_json, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults written to {results_json}")
 
     return results
