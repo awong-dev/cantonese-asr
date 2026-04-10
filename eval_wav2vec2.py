@@ -103,6 +103,7 @@ def run_evaluation(
     eval_holdback=False,
     eval_batch_size=64,
     dataloader_num_workers=4,
+    no_cache=True,
     results_json=None,
 ):
     """Evaluate a wav2vec2 model on test and/or holdback splits."""
@@ -182,6 +183,15 @@ def run_evaluation(
         samples = decoder.get_all_samples()
         return samples.data.squeeze().numpy()
 
+    def prepare_fn(batch):
+        audio_np = _load_audio(batch["clips_dir"], batch["path"])
+        batch["input_values"] = processor(
+            audio_np, sampling_rate=16000,
+        ).input_values[0]
+        batch["labels"] = processor.tokenizer(batch["sentence"]).input_ids
+        batch["input_length"] = len(audio_np)
+        return batch
+
     def prepare_fn_batched(batch):
         clips_dirs = batch.get("clips_dir", [default_clips_dir] * len(batch["path"]))
         audio_arrays = [_load_audio(cd, p) for cd, p in zip(clips_dirs, batch["path"])]
@@ -193,7 +203,7 @@ def run_evaluation(
         ]
         return batch
 
-    def preprocess(ds, name):
+    def preprocess(ds, name, streaming=True):
         """Clean text, normalize columns, extract features."""
         text_col = "sentence" if "sentence" in ds.column_names else "text"
         keep = {"path", text_col}
@@ -211,21 +221,30 @@ def run_evaluation(
         # Apply text cleaning (must match training)
         ds = ds.map(lambda batch: {"sentence": clean_text(batch["sentence"])})
 
+        num_samples = len(ds)
         remove_cols = ds.column_names
-        print(f"Preprocessing {name} ({len(ds)} samples)...")
-        ds = ds.map(prepare_fn_batched, remove_columns=remove_cols,
-                     batched=True, batch_size=16)
-        print(f"  Ready: {len(ds)} samples")
-        return ds
+
+        if streaming:
+            print(f"Setting up streaming eval for {name} ({num_samples} samples)...")
+            ds = (
+                ds.to_iterable_dataset(num_shards=max(1, num_samples // 1000))
+                .map(prepare_fn, remove_columns=remove_cols)
+            )
+        else:
+            print(f"Preprocessing {name} ({num_samples} samples)...")
+            ds = ds.map(prepare_fn_batched, remove_columns=remove_cols,
+                         batched=True, batch_size=16)
+            print(f"  Ready: {len(ds)} samples")
+        return ds, num_samples
 
     # ---- Preprocess ----
-    processed = [(name, preprocess(ds, name)) for name, ds in all_eval]
+    processed = [(name, *preprocess(ds, name, streaming=not no_cache)) for name, ds in all_eval]
 
     # ---- Evaluation loop ----
     _cer_transform = build_cer_transform()
     data_collator = DataCollatorCTCWithPadding(processor=processor)
 
-    def evaluate_split(dataset, split_name):
+    def evaluate_split(dataset, split_name, num_samples):
         """Run forward pass per batch, decode immediately, discard logits."""
         dataloader = DataLoader(
             dataset,
@@ -238,7 +257,7 @@ def run_evaluation(
 
         all_pred_str = []
         all_label_str = []
-        num_batches = (len(dataset) + eval_batch_size - 1) // eval_batch_size
+        num_batches = (num_samples + eval_batch_size - 1) // eval_batch_size
 
         for batch_idx, batch in enumerate(dataloader):
             input_values = batch["input_values"].to(device)
@@ -288,10 +307,10 @@ def run_evaluation(
     print("EVALUATION")
     print("=" * 60)
 
-    for split_name, ds in processed:
-        print(f"\nEvaluating on {split_name} ({len(ds)} samples)...")
+    for split_name, ds, num_samples in processed:
+        print(f"\nEvaluating on {split_name} ({num_samples} samples)...")
         try:
-            metrics = evaluate_split(ds, split_name)
+            metrics = evaluate_split(ds, split_name, num_samples)
             cer_raw = metrics.get("cer_raw", None)
             cer_nopunct = metrics.get("cer_nopunct", None)
             if cer_raw is not None:
@@ -351,6 +370,8 @@ def main():
     parser.add_argument("--eval_holdback", action="store_true")
     parser.add_argument("--eval_batch_size", type=int, default=64)
     parser.add_argument("--dataloader_num_workers", type=int, default=4)
+    parser.add_argument("--no_streaming", action="store_true",
+                        help="Preprocess all eval data to disk upfront instead of streaming")
     parser.add_argument("--results_json", type=str, default=None,
                         help="Write results to this JSON file")
     args = parser.parse_args()
@@ -375,6 +396,7 @@ def main():
         eval_holdback=args.eval_holdback,
         eval_batch_size=args.eval_batch_size,
         dataloader_num_workers=args.dataloader_num_workers,
+        no_cache=not args.no_streaming,
         results_json=args.results_json,
     )
 

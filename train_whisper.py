@@ -308,6 +308,21 @@ class DifferentialLRTrainer(Seq2SeqTrainer):
         if output_dir and self._whisper_tokenizer is not None:
             self._whisper_tokenizer.save_pretrained(output_dir)
 
+    def prediction_step(self, model, inputs, prediction_loss_only, **kwargs):
+        # Peft's generate wrapper passes labels through to Whisper's generate()
+        # which doesn't accept them. Temporarily patch generate to strip labels.
+        import peft
+        if isinstance(model, peft.PeftModel):
+            _orig_generate = model.generate
+            def _patched_generate(**gen_kwargs):
+                gen_kwargs.pop("labels", None)
+                return _orig_generate(**gen_kwargs)
+            model.generate = _patched_generate
+            result = super().prediction_step(model, inputs, prediction_loss_only, **kwargs)
+            model.generate = _orig_generate
+            return result
+        return super().prediction_step(model, inputs, prediction_loss_only, **kwargs)
+
     def compute_loss(self, model, inputs, num_items_in_batch=None, return_outputs=False):
         # Strip keys Whisper doesn't accept (e.g. input_ids injected by peft)
         inputs = {

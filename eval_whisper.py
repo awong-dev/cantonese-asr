@@ -92,6 +92,7 @@ def run_evaluation(
     eval_batch_size=64,
     dataloader_num_workers=4,
     nopunct_in_eval=False,
+    no_cache=True,
     results_json=None,
 ):
     """
@@ -190,6 +191,14 @@ def run_evaluation(
         samples = decoder.get_all_samples()
         return samples.data.squeeze(0).numpy()
 
+    def prepare_dataset(batch):
+        audio_np = _load_audio(batch["clips_dir"], batch["path"])
+        batch["input_features"] = feature_extractor(
+            audio_np, sampling_rate=16000,
+        ).input_features[0]
+        batch["labels"] = tokenizer(batch["sentence"]).input_ids
+        return batch
+
     def prepare_dataset_batched(batch):
         clips_dirs = batch.get("clips_dir", [default_clips_dir] * len(batch["path"]))
         audio_arrays = [_load_audio(cd, p) for cd, p in zip(clips_dirs, batch["path"])]
@@ -199,15 +208,13 @@ def run_evaluation(
         batch["labels"] = [tokenizer(s).input_ids for s in batch["sentence"]]
         return batch
 
-    def preprocess(ds, name):
+    def preprocess(ds, name, streaming=True):
         """Normalize columns and extract features."""
         text_col = "sentence" if "sentence" in ds.column_names else "text"
-        # Determine which columns to keep
         keep = {"path", text_col}
         if "clips_dir" in ds.column_names:
             keep.add("clips_dir")
         else:
-            # Infer clips_dir from default
             ds = ds.map(lambda x: {"clips_dir": default_clips_dir}, batched=False)
             keep.add("clips_dir")
         cols_to_remove = [c for c in ds.column_names if c not in keep]
@@ -216,17 +223,27 @@ def run_evaluation(
         if text_col != "sentence":
             ds = ds.rename_column(text_col, "sentence")
 
+        num_samples = len(ds)
         remove_cols = ds.column_names
-        print(f"Preprocessing {name} ({len(ds)} samples)...")
-        ds = ds.map(prepare_dataset_batched, remove_columns=remove_cols,
-                     batched=True, batch_size=16)
-        print(f"  Ready: {len(ds)} samples")
-        return ds
+
+        if streaming:
+            print(f"Setting up streaming eval for {name} ({num_samples} samples)...")
+            ds = (
+                ds.to_iterable_dataset(num_shards=max(1, num_samples // 1000))
+                .map(prepare_dataset, remove_columns=remove_cols)
+            )
+        else:
+            print(f"Preprocessing {name} ({num_samples} samples)...")
+            ds = ds.map(prepare_dataset_batched, remove_columns=remove_cols,
+                         batched=True, batch_size=16)
+            print(f"  Ready: {len(ds)} samples")
+        return ds, num_samples
 
     # ---- Preprocess all datasets ----
     processed = []
     for name, ds in all_eval:
-        processed.append((name, preprocess(ds, name)))
+        ds, num_samples = preprocess(ds, name, streaming=not no_cache)
+        processed.append((name, ds, num_samples))
 
     # ---- Evaluation loop ----
     from cer_utils import build_cer_transform, compute_cer, print_examples
@@ -241,7 +258,7 @@ def run_evaluation(
     all_preds = []
     all_refs = []
 
-    def evaluate_split(dataset, split_name):
+    def evaluate_split(dataset, split_name, num_samples):
         """Run generate() per batch, decode immediately, discard logits."""
         dataloader = DataLoader(
             dataset,
@@ -254,7 +271,7 @@ def run_evaluation(
 
         all_pred_str = []
         all_label_str = []
-        num_batches = (len(dataset) + eval_batch_size - 1) // eval_batch_size
+        num_batches = (num_samples + eval_batch_size - 1) // eval_batch_size
 
         for batch_idx, batch in enumerate(dataloader):
             input_features = batch["input_features"].to(device)
@@ -302,10 +319,10 @@ def run_evaluation(
     print("EVALUATION")
     print("=" * 60)
 
-    for split_name, ds in processed:
-        print(f"\nEvaluating on {split_name} ({len(ds)} samples)...")
+    for split_name, ds, num_samples in processed:
+        print(f"\nEvaluating on {split_name} ({num_samples} samples)...")
         try:
-            metrics = evaluate_split(ds, split_name)
+            metrics = evaluate_split(ds, split_name, num_samples)
             cer_raw = metrics.get("cer_raw", None)
             cer_nopunct = metrics.get("cer_nopunct", None)
             if cer_raw is not None:
@@ -392,6 +409,8 @@ def main():
     parser.add_argument("--eval_batch_size", type=int, default=64)
     parser.add_argument("--dataloader_num_workers", type=int, default=4)
     parser.add_argument("--nopunct_in_eval", action="store_true")
+    parser.add_argument("--no_streaming", action="store_true",
+                        help="Preprocess all eval data to disk upfront instead of streaming")
     parser.add_argument("--results_json", type=str, default=None,
                         help="Write results to this JSON file")
     args = parser.parse_args()
@@ -419,6 +438,7 @@ def main():
         eval_batch_size=args.eval_batch_size,
         dataloader_num_workers=args.dataloader_num_workers,
         nopunct_in_eval=args.nopunct_in_eval,
+        no_cache=not args.no_streaming,
         results_json=args.results_json,
     )
 
