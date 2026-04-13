@@ -32,7 +32,7 @@ def download_dataset(token, language, dataset_id, name, output_dir="./data"):
     import os
 
     # Get download URL
-    url = f"https://datacollective.mozillafoundation.org/api/datasets/{dataset_id}/download"
+    url = f"https://mozilladatacollective.com/api/datasets/{dataset_id}/download"
     print(f"  POST {url}")
     result = subprocess.run(
         ["curl", "-s", "-w", "\n%{http_code}", "-X", "POST", url,
