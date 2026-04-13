@@ -29,40 +29,79 @@ def download_dataset(token, language, dataset_id, name, output_dir="./data"):
     print(f"  Output dir: {output_dir}")
     print(f"{'=' * 60}")
 
+    import os
+
     # Get download URL
     url = f"https://datacollective.mozillafoundation.org/api/datasets/{dataset_id}/download"
+    print(f"  POST {url}")
     result = subprocess.run(
-        ["curl", "-s", "-X", "POST", url,
+        ["curl", "-s", "-w", "\n%{http_code}", "-X", "POST", url,
          "-H", f"Authorization: Bearer {token}",
          "-H", "Content-Type: application/json"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        print(f"  Error getting download URL: {result.stderr}")
+        print(f"  curl failed (exit {result.returncode}): {result.stderr}")
+        return False
+
+    # Split response body from HTTP status code
+    lines = result.stdout.rsplit("\n", 1)
+    body = lines[0]
+    http_code = lines[1] if len(lines) > 1 else "?"
+    print(f"  HTTP {http_code}, response length: {len(body)} bytes")
+
+    if http_code != "200":
+        print(f"  Unexpected HTTP status {http_code}")
+        print(f"  Response body: {body[:500]}")
         return False
 
     try:
-        response = json.loads(result.stdout)
+        response = json.loads(body)
     except json.JSONDecodeError:
-        print(f"  Error parsing response: {result.stdout[:200]}")
+        print(f"  Error parsing JSON response: {body[:500]}")
         return False
 
+    print(f"  Response keys: {list(response.keys())}")
     download_url = response.get("downloadUrl")
     if not download_url:
-        print(f"  No download URL in response: {response}")
+        print(f"  No downloadUrl in response: {response}")
         return False
 
+    print(f"  Download URL: {download_url[:120]}...")
+
+    # Check the download URL with a HEAD request to see redirects
+    print(f"  Checking download URL (HEAD)...")
+    head_result = subprocess.run(
+        ["curl", "-sI", "-L", "-o", "/dev/null", "-w",
+         "HTTP %{http_code}, final URL: %{url_effective}, content-type: %{content_type}, size: %{size_download}",
+         download_url],
+        capture_output=True, text=True,
+    )
+    print(f"  {head_result.stdout}")
+
     # Download and extract directly (pipe curl into tar)
-    import os
     os.makedirs(output_dir, exist_ok=True)
-    print(f"  Downloading and extracting...")
+    print(f"  Downloading and extracting to {output_dir}...")
     dl_result = subprocess.run(
-        f'curl -sL "{download_url}" | tar xz -C "{output_dir}"',
+        f'curl -L -v "{download_url}" 2>curl_stderr.log | tar xz -C "{output_dir}"',
         shell=True,
     )
     if dl_result.returncode != 0:
-        print(f"  Download/extract failed")
+        print(f"  Download/extract failed (exit {dl_result.returncode})")
+        # Show curl verbose output for debugging
+        try:
+            with open("curl_stderr.log") as f:
+                stderr = f.read()
+            print(f"  curl stderr (last 1000 chars):\n{stderr[-1000:]}")
+        except FileNotFoundError:
+            pass
         return False
+
+    # Clean up verbose log on success
+    try:
+        os.remove("curl_stderr.log")
+    except FileNotFoundError:
+        pass
 
     print(f"  Extracted to {output_dir}")
     return True
