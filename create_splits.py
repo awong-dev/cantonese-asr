@@ -42,6 +42,7 @@ def create_splits(
     seed=42,
     write_splits=False,
     write_dir=".",
+    dataset_ratio=None,
 ):
     """
     Load one or more Common Voice TSV filesets, exclude holdback samples,
@@ -166,6 +167,29 @@ def create_splits(
         test_splits.append(test_split)
         train_pools.append(remaining)
 
+    # ---- Apply dataset ratio sampling ----
+    if dataset_ratio is not None:
+        if isinstance(dataset_ratio, str):
+            ratio_parts = [int(r) for r in dataset_ratio.split(":")]
+        else:
+            ratio_parts = list(dataset_ratio)
+        if len(ratio_parts) == 1:
+            ratio_parts = ratio_parts * n_filesets
+        assert len(ratio_parts) == n_filesets, \
+            f"dataset_ratio has {len(ratio_parts)} parts but there are {n_filesets} filesets"
+
+        pool_sizes = [len(p) for p in train_pools]
+        base_count = min(pool_sizes[i] / ratio_parts[i] for i in range(n_filesets))
+
+        sampled_pools = []
+        for i, pool in enumerate(train_pools):
+            n_take = int(base_count * ratio_parts[i])
+            sampled = pool.shuffle(seed=seed).select(range(n_take))
+            print(f"[{fileset_names[i]}] Ratio {ratio_parts[i]}: "
+                  f"taking {n_take}/{pool_sizes[i]} samples")
+            sampled_pools.append(sampled)
+        train_pools = sampled_pools
+
     # ---- Pool all remaining samples ----
     if len(train_pools) == 1:
         pooled = train_pools[0]
@@ -234,6 +258,11 @@ def main():
     parser.add_argument("--pct_validation", type=float, default=0.1)
     parser.add_argument("--pct_test", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--dataset_ratio", type=str, default=None,
+        help="Colon-separated ratios for dataset sampling, e.g. '2:1' means "
+             "twice as many samples from the first dataset. Default: use all samples.",
+    )
     parser.add_argument("--write_splits", action="store_true")
     parser.add_argument("--write_dir", type=str, default=".")
     args = parser.parse_args()
@@ -247,6 +276,7 @@ def main():
         seed=args.seed,
         write_splits=args.write_splits,
         write_dir=args.write_dir,
+        dataset_ratio=args.dataset_ratio,
     )
 
     print(f"\nTrain:      {len(splits['train'])} samples")

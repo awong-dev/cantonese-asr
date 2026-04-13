@@ -90,6 +90,11 @@ def parse_args():
         "--write_splits", action="store_true",
         help="Write train/validation/test split TSVs to the current directory",
     )
+    parser.add_argument(
+        "--dataset_ratio", type=str, default=None,
+        help="Colon-separated ratios for dataset sampling, e.g. '2:1' means "
+             "twice as many samples from the first dataset. Default: use all samples.",
+    )
 
     # Language
     parser.add_argument(
@@ -429,6 +434,7 @@ def main():
         pct_test=args.pct_test,
         seed=args.seed,
         write_splits=args.write_splits,
+        dataset_ratio=args.dataset_ratio,
     )
 
     train_split = splits["train"]
