@@ -186,6 +186,10 @@ def parse_args():
     parser.add_argument("--eval_steps", type=int, default=1000)
     parser.add_argument("--save_steps", type=int, default=1000)
     parser.add_argument(
+        "--save_pre_decay", action="store_true",
+        help="Save a checkpoint before the decay phase in tri-stage LR schedule.",
+    )
+    parser.add_argument(
         "--early_stopping_patience", type=int, default=0,
         help="0 = disabled (default).",
     )
@@ -794,7 +798,7 @@ def main():
             )
         )
     tri_stage_cb = None
-    if tri_stage_args is not None:
+    if tri_stage_args is not None and args.save_pre_decay:
         from lr_schedule import TriStageCheckpointCallback
         tri_stage_cb = TriStageCheckpointCallback(
             num_training_steps=tri_stage_args["num_training_steps"],
