@@ -131,6 +131,7 @@ def parse_args():
         "--grad_accum", type=int, default=4,
         help="Gradient accumulation steps (effective batch = train_batch_size * grad_accum)",
     )
+    parser.add_argument("--dataloader_num_workers", type=int, default=4)
     parser.add_argument(
         "--eval_steps", type=int, default=1000, help="Evaluate every N steps",
     )
@@ -637,12 +638,12 @@ def main():
         # Saving
         save_strategy="steps",
         save_steps=args.save_steps,
-        save_total_limit=3,
+        save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model="cer_nopunct",
         greater_is_better=False,
         # Performance
-        dataloader_num_workers=4,
+        dataloader_num_workers=args.dataloader_num_workers,
         dataloader_pin_memory=True,
         remove_unused_columns=False,
         # Gradient

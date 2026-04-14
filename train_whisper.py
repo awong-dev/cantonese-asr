@@ -119,6 +119,12 @@ def parse_args():
         "--encoder_lr", type=float, default=None,
         help="Separate learning rate for encoder (default: same as --lr).",
     )
+    parser.add_argument(
+        "--layerwise_lr_decay", type=float, default=None,
+        help="When set, applies layerwise learning rate decay to decoder layers. "
+             "Layer 0 gets lr * decay^(N-1), top layer gets lr. "
+             "Typical values: 0.8-0.95. When None, uses flat LR for all decoder layers.",
+    )
 
     # LoRA
     parser.add_argument(
@@ -179,6 +185,7 @@ def parse_args():
              "to CPU. Higher = faster eval but more GPU memory. (default: 32)",
     )
     parser.add_argument("--grad_accum", type=int, default=4)
+    parser.add_argument("--dataloader_num_workers", type=int, default=4)
     parser.add_argument(
         "--output_dir", type=str, default="./whisper-finetuned",
     )
@@ -387,6 +394,30 @@ class DifferentialLRTrainer(Seq2SeqTrainer):
             )
             return self.lr_scheduler
         return super().create_scheduler(num_training_steps, optimizer)
+
+
+class LayerwiseLRTrainer(DifferentialLRTrainer):
+    """DifferentialLRTrainer with layerwise LR decay for decoder layers."""
+
+    def __init__(self, *args, lr_decay=0.9, **kwargs):
+        self._lr_decay = lr_decay
+        super().__init__(*args, **kwargs)
+
+    def create_optimizer(self):
+        if self.optimizer is not None:
+            return self.optimizer
+        from layerwise_lr import create_layerwise_optimizer
+        self.optimizer = create_layerwise_optimizer(
+            model=self.model,
+            base_lr=self.args.learning_rate,
+            lr_decay=self._lr_decay,
+            encoder_lr=self.encoder_lr,
+            weight_decay=self.args.weight_decay,
+            adam_beta1=self.args.adam_beta1,
+            adam_beta2=self.args.adam_beta2,
+            adam_epsilon=self.args.adam_epsilon,
+        )
+        return self.optimizer
 
 
 # ---------------------------------------------------------------------------
@@ -763,13 +794,13 @@ def main():
         # Keep the 3 most recent checkpoints; load the best one (by CER) at end.
         save_strategy="steps",
         save_steps=args.save_steps,
-        save_total_limit=3,
+        save_total_limit=2,
         load_best_model_at_end=True,
         metric_for_best_model=best_model_metric,
         greater_is_better=False,  # lower CER = better
 
         # --- Performance ---
-        dataloader_num_workers=4,
+        dataloader_num_workers=args.dataloader_num_workers,
         dataloader_pin_memory=True,
         # Don't auto-remove columns — our collator handles the batch format
         remove_unused_columns=False,
@@ -807,7 +838,13 @@ def main():
         )
         callbacks.append(tri_stage_cb)
 
-    trainer = DifferentialLRTrainer(
+    TrainerClass = DifferentialLRTrainer
+    extra_trainer_kwargs = {}
+    if args.layerwise_lr_decay is not None:
+        TrainerClass = LayerwiseLRTrainer
+        extra_trainer_kwargs["lr_decay"] = args.layerwise_lr_decay
+
+    trainer = TrainerClass(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -820,6 +857,7 @@ def main():
         tokenizer=tokenizer,
         callbacks=callbacks,
         tri_stage_args=tri_stage_args,
+        **extra_trainer_kwargs,
     )
     if tri_stage_cb is not None:
         tri_stage_cb.trainer = trainer
@@ -842,7 +880,7 @@ def main():
             eval_holdback=bool(args.holdback_tsv),
             language_full=args.language_full,
             eval_batch_size=args.eval_batch_size,
-            dataloader_num_workers=4,
+            dataloader_num_workers=args.dataloader_num_workers,
             nopunct_in_eval=args.nopunct_in_eval,
         )
 
@@ -889,7 +927,7 @@ def main():
         eval_holdback=bool(args.holdback_tsv),
         language_full=args.language_full,
         eval_batch_size=args.eval_batch_size,
-        dataloader_num_workers=4,
+        dataloader_num_workers=args.dataloader_num_workers,
         nopunct_in_eval=args.nopunct_in_eval,
         results_json=os.path.join(args.output_dir, "eval_results.json"),
     )
