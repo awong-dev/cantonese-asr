@@ -94,9 +94,10 @@ def add_lr_schedule_args(parser):
     """Add --lr_schedule and tri-stage-specific args to an argparse parser."""
     parser.add_argument(
         "--lr_schedule", type=str, default="cosine",
-        choices=["cosine", "tri_stage"],
-        help="LR schedule: 'cosine' (HF default) or 'tri_stage' (fairseq-style "
-             "warmup/hold/decay). (default: cosine)",
+        choices=["cosine", "linear", "tri_stage"],
+        help="LR schedule: 'cosine' (HF default), 'linear' (linear warmup + "
+             "linear decay), or 'tri_stage' (fairseq-style warmup/hold/decay). "
+             "(default: cosine)",
     )
     parser.add_argument(
         "--tri_stage_warmup_pct", type=float, default=0.1,
@@ -134,9 +135,9 @@ def resolve_lr_schedule_args(args, total_steps):
               f"decay={1-args.tri_stage_warmup_pct-args.tri_stage_hold_pct:.0%}, "
               f"final_lr_scale={args.tri_stage_final_lr_scale})")
     else:
-        hf_scheduler_type = "cosine"
+        hf_scheduler_type = args.lr_schedule  # "cosine" or "linear"
         hf_warmup_steps = args.warmup
         tri_stage_args = None
-        print(f"LR schedule: cosine (warmup={args.warmup} steps)")
+        print(f"LR schedule: {args.lr_schedule} (warmup={args.warmup} steps)")
 
     return hf_scheduler_type, hf_warmup_steps, tri_stage_args
