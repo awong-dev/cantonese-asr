@@ -79,8 +79,8 @@ COMMON_ARGS=(
     --warmup 1000
     --epochs 30
     --train_batch_size 16
-    --eval_batch_size 96
-    --eval_accumulation_steps 32
+    --eval_batch_size 32
+    --eval_accumulation_steps 1
     --grad_accum 1
     --eval_steps 500
     --save_steps 500
@@ -186,12 +186,14 @@ test_2() {
 
 test_3() {
     run_test 3 "enc2" "./whisper-large-v3-yue-test3-enc2" \
-        --unfreeze_encoder_layers 2 --encoder_lr 5e-8 --freeze_decoder_layers 12 --lr 5e-8
+        --unfreeze_encoder_layers 2 --encoder_lr 5e-8 --freeze_decoder_layers 12 --lr 5e-8 \
+        --train_batch_size 8 --grad_accum 2
 }
 
 test_4() {
     run_test 4 "combined" "./whisper-large-v3-yue-test4-combined" \
-        --unfreeze_encoder_layers 2 --encoder_lr 5e-8 --freeze_decoder_layers 8 --lr 5e-8
+        --unfreeze_encoder_layers 2 --encoder_lr 5e-8 --freeze_decoder_layers 8 --lr 5e-8 \
+        --train_batch_size 8 --grad_accum 2
 }
 
 test_5() {
