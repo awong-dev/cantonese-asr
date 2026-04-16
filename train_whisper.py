@@ -75,6 +75,20 @@ def parse_args():
         help="Comma-separated holdback TSV filenames to exclude (default: none)",
     )
     parser.add_argument(
+        "--validation_tsv",
+        type=str,
+        default=None,
+        help="Comma-separated explicit validation TSV filenames. "
+             "When set, pct_validation is ignored.",
+    )
+    parser.add_argument(
+        "--test_tsv",
+        type=str,
+        default=None,
+        help="Comma-separated explicit test TSV filenames. "
+             "When set, pct_test is ignored.",
+    )
+    parser.add_argument(
         "--pct_validation",
         type=float,
         default=0.1,
@@ -465,6 +479,8 @@ def main():
         dataset_paths=args.dataset_path,
         all_tsvs=args.all_tsv,
         holdback_tsvs=args.holdback_tsv,
+        validation_tsvs=args.validation_tsv,
+        test_tsvs=args.test_tsv,
         pct_validation=args.pct_validation,
         pct_test=args.pct_test,
         seed=args.seed,
@@ -873,6 +889,8 @@ def main():
             dataset_path=args.dataset_path,
             all_tsv=args.all_tsv,
             holdback_tsv=args.holdback_tsv if args.holdback_tsv else None,
+            validation_tsv=args.validation_tsv,
+            test_tsv=args.test_tsv,
             pct_validation=args.pct_validation,
             pct_test=args.pct_test,
             seed=args.seed,
@@ -920,6 +938,8 @@ def main():
         dataset_path=args.dataset_path,
         all_tsv=args.all_tsv,
         holdback_tsv=args.holdback_tsv if args.holdback_tsv else None,
+        validation_tsv=args.validation_tsv,
+        test_tsv=args.test_tsv,
         pct_validation=args.pct_validation,
         pct_test=args.pct_test,
         seed=args.seed,

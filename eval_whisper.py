@@ -82,6 +82,7 @@ def run_evaluation(
     holdback_tsv=None,
     # --- Mode 2: regenerate splits from seed ---
     all_tsv=None,
+    validation_tsv=None,
     pct_validation=0.1,
     pct_test=0.1,
     seed=None,
@@ -116,6 +117,8 @@ def run_evaluation(
             dataset_paths=dataset_path,
             all_tsvs=all_tsv,
             holdback_tsvs=holdback_tsv or "",
+            validation_tsvs=validation_tsv,
+            test_tsvs=test_tsv,
             pct_validation=pct_validation,
             pct_test=pct_test,
             seed=seed,
