@@ -18,19 +18,26 @@
 #   ./run_all_tests.sh --tests 1,3,5      # run specific tests
 #   ./run_all_tests.sh --skip-cleanup     # keep model dirs for inspection
 #   ./run_all_tests.sh --tests 6 --skip-cleanup
+#   ./run_all_tests.sh --tests 1 --steps upload,convert,transcribe  # skip training
+#   ./run_all_tests.sh --tests 1 --steps train                      # train only
 
-set -u
+set -eu
 
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
 TESTS_TO_RUN="1,2,3,4,5,6"
 SKIP_CLEANUP=false
+STEPS="train,upload,convert,transcribe,cleanup"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --tests)
             TESTS_TO_RUN="$2"
+            shift 2
+            ;;
+        --steps)
+            STEPS="$2"
             shift 2
             ;;
         --skip-cleanup)
@@ -39,10 +46,25 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: $0 [--tests 1,3,5] [--skip-cleanup]"
+            echo "Usage: $0 [--tests 1,3,5] [--steps train,upload,convert,transcribe,cleanup] [--skip-cleanup]"
             exit 1
             ;;
     esac
+done
+
+# Parse steps into a lookup
+declare -A RUN_STEP
+for s in train upload convert transcribe cleanup; do
+    RUN_STEP[$s]=false
+done
+IFS=',' read -ra STEP_LIST <<< "$STEPS"
+for s in "${STEP_LIST[@]}"; do
+    s=$(echo "$s" | tr -d ' ')
+    if [[ -z "${RUN_STEP[$s]+x}" ]]; then
+        echo "Unknown step: $s (valid: train, upload, convert, transcribe, cleanup)"
+        exit 1
+    fi
+    RUN_STEP[$s]=true
 done
 
 # ---------------------------------------------------------------------------
@@ -58,6 +80,7 @@ exec > >(while IFS= read -r line; do echo "$(date '+%Y-%m-%d %H:%M:%S') $line"; 
 echo "========================================"
 echo "Starting test run"
 echo "Tests to run: $TESTS_TO_RUN"
+echo "Steps:        $STEPS"
 echo "Skip cleanup: $SKIP_CLEANUP"
 echo "Results dir:  $RESULTS_DIR"
 echo "========================================"
@@ -110,59 +133,42 @@ run_test() {
     echo "========================================"
 
     # ---- Train ----
-    echo "[test $test_num] Training..."
-    if python3 train_whisper.py "${COMMON_ARGS[@]}" "${test_args[@]}" --output_dir "$output_dir"; then
+    if [ "${RUN_STEP[train]}" = true ]; then
+        echo "[test $test_num] Training..."
+        python3 train_whisper.py "${COMMON_ARGS[@]}" "${test_args[@]}" --output_dir "$output_dir"
         echo "[test $test_num] Training succeeded"
-    else
-        echo "[test $test_num] TRAINING FAILED (exit $?)"
-        TEST_STATUS[$test_num]="FAILED (training)"
-        # Still clean up
-        if [ "$SKIP_CLEANUP" = false ]; then
-            echo "[test $test_num] Cleaning up..."
-            ./clean-cache.sh || true
-            rm -rf "$output_dir" "$ct2_dir"
-        fi
-        return 1
     fi
 
     # ---- Upload ----
-    echo "[test $test_num] Uploading model..."
-    if python3 upload_model.py \
-        --model_path "$output_dir/final" \
-        --repo_name "$(basename "$output_dir")" <<< "y"; then
+    if [ "${RUN_STEP[upload]}" = true ]; then
+        echo "[test $test_num] Uploading model..."
+        python3 upload_model.py \
+            --model_path "$output_dir/final" \
+            --repo_name "$(basename "$output_dir")" <<< "y"
         echo "[test $test_num] Upload succeeded"
-    else
-        echo "[test $test_num] Upload failed (continuing)"
     fi
 
     # ---- Convert to CT2 ----
-    echo "[test $test_num] Converting to CT2..."
-    if python3 convert_ct2.py --model "$output_dir/final" --output_dir "$ct2_dir"; then
+    if [ "${RUN_STEP[convert]}" = true ]; then
+        echo "[test $test_num] Converting to CT2..."
+        python3 convert_ct2.py --model "$output_dir/final" --output_dir "$ct2_dir"
         echo "[test $test_num] CT2 conversion succeeded"
-    else
-        echo "[test $test_num] CT2 conversion failed (continuing)"
     fi
 
     # ---- Transcribe ----
-    if [ -d "$ct2_dir" ]; then
+    if [ "${RUN_STEP[transcribe]}" = true ]; then
         echo "[test $test_num] Transcribing..."
         local transcribe_out_dir="$RESULTS_DIR/transcribe_${test_name}"
-        if ./transcribe.sh "$ct2_dir" "test_${test_name}" ~/1-yue.opus; then
-            # Copy results to results dir
-            cp -r "out/test_${test_name}" "$transcribe_out_dir" 2>/dev/null || true
-            echo "[test $test_num] Transcription saved to $transcribe_out_dir"
-            TEST_TRANSCRIPT[$test_num]="$transcribe_out_dir"
-        else
-            echo "[test $test_num] Transcription failed (continuing)"
-        fi
-    else
-        echo "[test $test_num] Skipping transcription (no CT2 model)"
+        ./transcribe.sh "$ct2_dir" "test_${test_name}" ~/1-yue.opus
+        cp -r "out/test_${test_name}" "$transcribe_out_dir"
+        echo "[test $test_num] Transcription saved to $transcribe_out_dir"
+        TEST_TRANSCRIPT[$test_num]="$transcribe_out_dir"
     fi
 
     # ---- Cleanup ----
-    if [ "$SKIP_CLEANUP" = false ]; then
+    if [ "${RUN_STEP[cleanup]}" = true ] && [ "$SKIP_CLEANUP" = false ]; then
         echo "[test $test_num] Cleaning up..."
-        ./clean-cache.sh || true
+        ./clean-cache.sh
         rm -rf "$output_dir" "$ct2_dir"
         rm -rf "out/test_${test_name}"
     fi
@@ -220,7 +226,7 @@ IFS=',' read -ra SELECTED <<< "$TESTS_TO_RUN"
 for t in "${SELECTED[@]}"; do
     t=$(echo "$t" | tr -d ' ')
     if declare -f "test_$t" > /dev/null 2>&1; then
-        "test_$t" || true
+        "test_$t"
     else
         echo "Unknown test: $t (skipping)"
     fi
