@@ -187,6 +187,15 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--warmup", type=int, default=500, help="Warmup steps")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
+    parser.add_argument(
+        "--optim", type=str, default="adamw_torch",
+        help="Optimizer type (e.g. adamw_torch, adamw_bnb_8bit). "
+             "Passed directly to Seq2SeqTrainingArguments optim parameter.",
+    )
+    parser.add_argument(
+        "--fp16", action="store_true",
+        help="Use fp16 mixed precision instead of bf16.",
+    )
 
     # LR schedule (cosine or tri_stage)
     from lr_schedule import add_lr_schedule_args
@@ -786,8 +795,9 @@ def main():
         # --- Precision ---
         # bf16 is preferred on Ampere+ GPUs (A100, 3090, 4090);
         # fp16 can cause loss spikes with Whisper due to dynamic range issues
-        fp16=False,
-        bf16=torch.cuda.is_available(),
+        optim=args.optim,
+        fp16=args.fp16,
+        bf16=(not args.fp16 and torch.cuda.is_available()),
 
         # --- Evaluation ---
         # Run eval every eval_steps; eval_accumulation_steps controls how many

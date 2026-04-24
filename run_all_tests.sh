@@ -2,8 +2,9 @@
 #
 # Run a progression of 6 Whisper fine-tuning experiments on Cantonese data.
 #
-# Test 1 — Baseline: khleeloo recipe (freeze encoder, freeze 12/32 decoder layers)
-# Test 2 — More decoder: same as baseline but freeze only 8 decoder layers
+# Test 1  — Baseline: khleeloo recipe (freeze encoder, freeze 12/32 decoder layers)
+# Test 1b — Baseline with fp16 + 8-bit Adam (lower VRAM, check for quality parity)
+# Test 2  — More decoder: same as baseline but freeze only 8 decoder layers
 # Test 3 — Light encoder: unfreeze top 2 encoder layers with separate LR
 # Test 4 — Combined: unfreeze top 2 encoder + more decoder (tests 2+3 together)
 # Test 5 — LoRA: decoder-only LoRA with all decoder layers trainable
@@ -26,7 +27,7 @@ set -eu
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
-TESTS_TO_RUN="1,2,3,4,5,6"
+TESTS_TO_RUN="1,1b,2,3,4,5,6"
 SKIP_CLEANUP=false
 STEPS="train,upload,convert,transcribe,cleanup"
 
@@ -183,6 +184,12 @@ run_test() {
 test_1() {
     run_test 1 "baseline" "./whisper-large-v3-yue-test1-baseline" \
         --freeze_encoder --freeze_decoder_layers 12 --lr 5e-8
+}
+
+test_1b() {
+    run_test 1b "baseline-fp16-8bit" "./whisper-large-v3-yue-test1b-baseline-fp16-8bit" \
+        --freeze_encoder --freeze_decoder_layers 12 --lr 5e-8 \
+        --fp16 --optim adamw_bnb_8bit
 }
 
 test_2() {

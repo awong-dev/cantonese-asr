@@ -5,6 +5,7 @@ whisper
 evaluate
 transformers[torch]
 jiwer
-torchcodec
+torchcodec==0.7.0
 tensorboardX
 peft
+ctranslate2
